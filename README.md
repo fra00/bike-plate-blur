@@ -264,7 +264,8 @@ plates-blur/
   batch_blur.py           ← folder batch
   config.toml             ← tunables
   requirements.txt        ← pip packages
-  license-plate-finetune-v1m.pt   ← YOU add this (not in git)
+  license-plate-finetune-v1m.pt   ← plate model (in git, ~39 MB)
+  yolov8n.pt                      ← vehicle model (in git, ~6 MB)
   plates/                 ← library code
   eval_detection.py       ← measure detection quality on a cache
   export_moto_crops.py    ← export crops for fine-tuning
