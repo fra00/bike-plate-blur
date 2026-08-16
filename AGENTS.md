@@ -17,6 +17,8 @@ tracking (prefer `--zone-filter kalman`). Config: `config.toml`.
 ```bash
 python blur_plates.py input.mp4 output.mp4 --zone-filter kalman
 python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --detect-cache cache/run.jsonl --zone-filter kalman
+# Offline anti-blink (needs existing cache; keep kalman for quality):
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --detect-cache cache/run.jsonl --zone-filter kalman --offline-zones
 ```
 
 ## Env

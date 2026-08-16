@@ -127,6 +127,7 @@ def main():
     trk  = cfg.get("tracking", {})
     pre  = cfg.get("preprocessing", {})
     red  = cfg.get("redact", {})
+    off  = cfg.get("offline", {})
 
     parser = argparse.ArgumentParser(
         description="Blur license plates in video with zero quality loss.",
@@ -224,6 +225,12 @@ Examples:
                              "does, so tracking/blur experiments skip inference "
                              "entirely. The cache is refused if the detection "
                              "settings differ from the ones it was built with.")
+    parser.add_argument("--offline-zones", dest="offline_zones",
+                        action="store_true",
+                        help="Hybrid anti-blink: keep the online tracker for "
+                             "blur quality, and fill frames where it emits "
+                             "nothing using past+future bridges from an "
+                             "existing --detect-cache (motion-gated).")
     parser.add_argument("--fixlist", dest="fixlist",
                         default=None,
                         metavar="JSON",
@@ -239,6 +246,14 @@ Examples:
 
     if start_sec is not None and end_sec is not None and end_sec <= start_sec:
         print("Error: --end must be after --start")
+        sys.exit(1)
+
+    if args.offline_zones and not args.detect_cache:
+        print("Error: --offline-zones requires --detect-cache PATH")
+        sys.exit(1)
+    if args.offline_zones and args.detect_cache and not os.path.exists(args.detect_cache):
+        print("Error: --offline-zones needs an existing cache file "
+              f"(not found: {args.detect_cache})")
         sys.exit(1)
 
     own_plate = parse_region(args.own_plate) if args.own_plate else None
@@ -340,6 +355,16 @@ Examples:
             "kf_sigma_pad_max", "kf_pad_decay", "kf_vel_decay",
             "kf_anchor_meas_scale",
         ) if k in trk},
+        offline_zones=bool(args.offline_zones),
+        offline_params={
+            "max_gap_frames": int(off.get("max_gap_frames", 15)),
+            "max_disp_px": float(off.get("max_disp_px", 80.0)),
+            "max_disp_frac": float(off.get("max_disp_frac", 0.35)),
+            "conf_floor": float(off.get("conf_floor", 0.15)),
+            "moto_only": bool(off.get("moto_only", True)),
+            "min_vehicle_iou": float(off.get("min_vehicle_iou", 0.15)),
+            "min_blur_box_h_frac": float(trk.get("moto_min_blur_box_h_frac", 0.10)),
+        },
     )
 
 

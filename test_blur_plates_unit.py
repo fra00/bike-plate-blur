@@ -1221,6 +1221,7 @@ def test_kalman_moto_anchor_is_weak_measurement_not_size_floor():
         moto_anchor_frac=0.20, moto_anchor_y=0.50, moto_anchor_pad=0.05,
         moto_zone_min_side=40.0, fallback_min_frames=1,
         moto_near_frac=0.40,   # keep this box out of the near-widen path
+        moto_min_blur_box_h_frac=0.0,  # this unit box is intentionally tiny
         kf_anchor_meas_scale=5.0, moto_plate_pad=4,
     )
     # 90 px tall → well below near threshold; plate-sized side ≈ 18 px.
@@ -1355,8 +1356,8 @@ def test_moto_too_small_gate():
 def test_moto_trusted_tight_vs_weak_fender():
     tr = bp.SceneTracker(
         moto_anchor=True, moto_plate_promote_frames=2,
-        moto_max_zone_box_frac=0.35, moto_weak_fender_frac=0.90,
-        moto_zone_min_side=20.0,
+        moto_anchor_frac=0.40, moto_max_zone_box_frac=0.35,
+        moto_weak_fender_frac=0.75, moto_zone_min_side=20.0,
     )
     from plates.track import VehicleTrack
     box = (1000, 400, 1200, 900)  # tall near moto 200x500
@@ -1373,9 +1374,11 @@ def test_moto_trusted_tight_vs_weak_fender():
     vt.moto_plate_miss = 8  # weak / coasting
     assert not tr._moto_trusted(vt)
     weak = tr._moto_anchor_box(vt, box, fw=1920, fh=1080)
-    # Weak path stretches toward fender (~0.90 of box)
-    assert weak[3] >= box[1] + int(500 * 0.85)
-
+    wh = weak[3] - weak[1]
+    # Weak oval ≈ 40% of moto height, sitting in the lower half (mid→tyre).
+    assert wh <= int(500 * 0.40) + 2
+    assert weak[3] >= box[1] + int(500 * 0.55)
+    assert weak[1] >= box[1] + int(500 * 0.25)
 
 def test_cap_moto_zone_shrinks_oversized():
     tr = bp.SceneTracker(moto_max_zone_box_frac=0.25)

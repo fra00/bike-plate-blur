@@ -203,6 +203,18 @@ python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 ^
 First run **writes** the cache; later runs **read** it (as long as detection
 settings in `config.toml` did not change).
 
+### Offline anti-blink (past + future)
+
+After you have a cache, fill short tracker blinks with motion-gated bridges.
+The online tracker still owns blur quality (use `--zone-filter kalman`):
+
+```bash
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 ^
+  --detect-cache cache/my_clip.jsonl --zone-filter kalman --offline-zones
+```
+
+Uses `[offline]` in `config.toml`. Large jumps are not bridged (different moto).
+
 ### Batch a folder
 
 ```bash
@@ -230,6 +242,7 @@ Exit code `0` = success. Activate the same `venv` (or use
 | `--start` / `--end` | Process only a time range (`MM:SS`) |
 | `--vehicles motorbike` | Ignore cars/trucks/buses |
 | `--detect-cache PATH` | Save/replay detections (JSONL) |
+| `--offline-zones` | Hybrid gap-fill from cache (needs existing `--detect-cache`) |
 | `--detect-scale 0.5` | Faster detection (default often `0.5` in config) |
 | `--debug` | Show boxes instead of blur |
 | `--debug-overlay` | Rich debug overlay |
@@ -251,7 +264,7 @@ blur_shape = "round"
 
 [tracking]
 zone_filter = "ema"                # override with --zone-filter kalman
-moto_min_blur_box_h_frac = 0.10    # skip tiny distant motos (~10% of frame height)
+moto_min_blur_box_h_frac = 0.1065  # skip tiny distant motos (~115 px @ 1080p)
 ```
 
 ---

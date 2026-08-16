@@ -861,12 +861,18 @@ class SceneTracker:
         elif track.plate_rel is not None:
             rx, ry, rw, rh = track.plate_rel
             ry = min(0.72, ry + 0.05)
+            # Weak plate: oval around mid-rear, height capped near anchor_frac.
             side_w = max(bw * rw * 1.30, bw * 0.20, self.moto_zone_min_side * 0.5)
-            side_h = max(bh * rh * 1.30, bh * 0.26, self.moto_zone_min_side * 0.5)
+            side_h = min(
+                max(bh * rh * 1.30, bh * 0.22, self.moto_zone_min_side * 0.5),
+                bh * self.moto_anchor_frac,
+            )
             cx = x1 + bw * rx
             cy = y1 + bh * ry
-            z2 = max(int(cy + side_h * 0.5), int(y1 + bh * self.moto_weak_fender_frac))
-            z1 = min(int(cy - side_h * 0.5), z2 - int(side_h))
+            z1 = int(cy - side_h * 0.5)
+            z2 = int(cy + side_h * 0.5)
+            fender = int(y1 + bh * self.moto_weak_fender_frac)
+            z2 = min(max(z2, fender), z1 + int(bh * self.moto_anchor_frac))
             zone = (int(cx - side_w * 0.5), z1, int(cx + side_w * 0.5), z2)
         else:
             near = fh > 0 and bh > self.moto_near_frac * fh
@@ -874,19 +880,24 @@ class SceneTracker:
             if near:
                 y_frac = min(self.moto_anchor_y_max,
                              self.moto_anchor_y + 0.20 * bh / max(fh, 1))
-            min_side = max(bh * 0.28,
+            min_side = max(bh * self.moto_anchor_frac,
                            self.moto_zone_min_side if bh < self.moto_zone_min_side * 2
                            else 0.0)
             zone = track.anchor_rect(self.moto_anchor_frac, y_frac,
                                      self.moto_anchor_pad,
                                      base_box=base_box, min_side=min_side)
             zx1, zy1, zx2, zy2 = zone
-            zy2 = max(zy2, int(y1 + bh * self.moto_weak_fender_frac))
+            zcx = (zx1 + zx2) * 0.5
+            fender = int(y1 + bh * self.moto_weak_fender_frac)
+            # Soft fender, then re-clamp height to ~moto_anchor_frac (mid→tyre).
+            zy2 = max(zy2, fender)
+            max_h = int(bh * self.moto_anchor_frac)
+            if (zy2 - zy1) > max_h:
+                zy1 = zy2 - max_h
             zone = (zx1, zy1, zx2, zy2)
             if near:
-                cx = (zone[0] + zone[2]) * 0.5
                 nw = (zone[2] - zone[0]) * self.moto_close_zone_w
-                zone = (int(cx - nw * 0.5), zone[1], int(cx + nw * 0.5), zone[3])
+                zone = (int(zcx - nw * 0.5), zone[1], int(zcx + nw * 0.5), zone[3])
         zx1, zy1, zx2, zy2 = zone
         if fw and fh:
             zx1 = max(0, zx1); zy1 = max(0, zy1)
@@ -963,7 +974,7 @@ class SceneTracker:
         x1, y1, x2, y2 = track.box
         bw = max(1.0, x2 - x1)
         bh = max(1.0, y2 - y1)
-        return min(max(self.moto_zone_min_side, bh * 0.32), bw * 1.2)
+        return min(max(self.moto_zone_min_side, bh * self.moto_anchor_frac), bw * 1.2)
 
     def _kf_zone(self, track, pad: int, min_side: float = 0.0) -> tuple:
         """Zone from the filter: estimate plus padding grown by uncertainty.
@@ -1016,11 +1027,14 @@ class SceneTracker:
                 zone = self._cap_moto_zone(zone, clamp_box)
             if track.cls == 3 and not trusted:
                 bx1, by1, bx2, by2 = clamp_box
-                fender = int(by1 + (by2 - by1) * self.moto_weak_fender_frac)
+                bh = max(1.0, by2 - by1)
+                fender = int(by1 + bh * self.moto_weak_fender_frac)
                 if zone[3] < fender:
                     zone = (zone[0], zone[1], zone[2], fender)
-                # Keep horizontal span from covering the whole bike, but never
-                # shrink the vertical fender coverage we just added.
+                # Keep weak ovals mid→tyre (~moto_anchor_frac), not full rear.
+                max_h = int(bh * self.moto_anchor_frac)
+                if (zone[3] - zone[1]) > max_h:
+                    zone = (zone[0], zone[3] - max_h, zone[2], zone[3])
                 zw = zone[2] - zone[0]
                 max_w = max(1.0, (bx2 - bx1) * 0.55)
                 if zw > max_w:
@@ -1038,6 +1052,8 @@ class SceneTracker:
                     zone = _clamp_to_box(zone, clamp_box)
                     if zone[3] < fender:
                         zone = (zone[0], zone[1], zone[2], fender)
+                    if (zone[3] - zone[1]) > max_h:
+                        zone = (zone[0], zone[3] - max_h, zone[2], zone[3])
         # Bound how fast the emitted zone may travel. This only bites when the
         # new zone does not overlap the previous one — i.e. on a genuine
         # discontinuity, such as the hold window expiring and the zone reverting
@@ -1580,7 +1596,8 @@ class SceneTracker:
                     # (moto_zone_min_side) that fits small/far motos leaves a
                     # near moto's plate half-covered (its plate is ~40-45% of
                     # the YOLO box height). Scale the floor by the box height.
-                    min_side = max(self.moto_zone_min_side, int(bh * 0.32))
+                    min_side = max(self.moto_zone_min_side,
+                                   int(bh * self.moto_anchor_frac))
                     zone = track.anchor_rect(self.moto_anchor_frac,
                                              y_frac,
                                              self.moto_anchor_pad,

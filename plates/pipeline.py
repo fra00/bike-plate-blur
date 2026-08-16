@@ -37,6 +37,11 @@ from plates.redact import (
     _match_quad_state,
     _quad_state_update,
 )
+from plates.offline_zones import (
+    build_offline_zones,
+    merge_tracker_with_offline_fills,
+    offline_zone_stats,
+)
 from plates.report import _print_run_summary
 from plates.track import SceneTracker
 
@@ -114,6 +119,8 @@ def blur_license_plates(
     detect_cache: str = None,
     zone_filter: str = "ema",
     kf_params: dict = None,
+    offline_zones: bool = False,
+    offline_params: dict = None,
 ):
     if tmp_dir == "auto":
         tmp_dir = os.path.join(tempfile.gettempdir(), "plate-blur-tmp")
@@ -157,6 +164,8 @@ def blur_license_plates(
               f"(y>={moto_crop_bottom_frac:.2f}, pad={moto_crop_side_pad_frac:.2f})")
     if debug:
         print(f"  Mode  : DEBUG (blur applied + detection overlay)")
+    if offline_zones:
+        print(f"  Zones : hybrid (online tracker + offline gap fills)")
     if tracking_enabled:
         print(f"  Track : enabled  (gap={max_gap_frames} frames, history={history_frames}, "
               f"expand_max={predict_expand_max}px)")
@@ -198,6 +207,31 @@ def blur_license_plates(
                   + ("  [PARTIAL — write was interrupted]" if cache.partial else ""))
         else:
             print(f"  Cache : writing detections to {os.path.basename(detect_cache)}")
+
+    offline_zones_map = None
+    if offline_zones:
+        if cache is None or not cache.reading:
+            raise ValueError(
+                "--offline-zones requires an existing --detect-cache JSONL "
+                "(build the cache first, then re-run with --offline-zones)"
+            )
+        _off = dict(offline_params or {})
+        offline_zones_map = build_offline_zones(
+            cache,
+            max_gap_frames=int(_off.get("max_gap_frames", 15)),
+            max_disp_px=float(_off.get("max_disp_px", 80.0)),
+            max_disp_frac=float(_off.get("max_disp_frac", 0.35)),
+            conf_floor=float(_off.get("conf_floor", 0.15)),
+            moto_only=bool(_off.get("moto_only", True)),
+            min_blur_box_h_frac=float(
+                _off.get("min_blur_box_h_frac", moto_min_blur_box_h_frac)
+            ),
+            frame_height=height,
+            min_vehicle_iou=float(_off.get("min_vehicle_iou", 0.15)),
+        )
+        _st = offline_zone_stats(offline_zones_map)
+        print(f"  Offline zones: {_st['frames_with_zones']} frames, "
+              f"{_st['raw_zones']} raw + {_st['bridged_zones']} bridged")
 
     # Reading a cache replays stored detections, so the detector is never called
     # and loading it would only cost startup time and memory.
@@ -376,6 +410,10 @@ def blur_license_plates(
                             vehicles, plates, frame,
                             frame_size=(width, height),
                         )
+                        if offline_zones_map is not None:
+                            plates = merge_tracker_with_offline_fills(
+                                plates, offline_zones_map.get(frame_num),
+                            )
                         if tracker.debug_zones:
                             for p in plates:
                                 if len(p) > 5 and p[5] == "anchor":
@@ -391,6 +429,13 @@ def blur_license_plates(
                                     print(f"[ZONE] f={frame_num} conf={p[4]:.2f} "
                                           f"zone=({z[0]:.0f},{z[1]:.0f},{z[2]:.0f},{z[3]:.0f}) "
                                           f"{qinfo}", flush=True)
+                    elif offline_zones_map is not None:
+                        # Tracking disabled but offline requested: bridges only
+                        # on empty frames (no raw offline replacements).
+                        plates = merge_tracker_with_offline_fills(
+                            [], offline_zones_map.get(frame_num),
+                        )
+                        suppressed_plates = []
                     else:
                         # Tracking disabled: AR filter only — no suppression
                         vehicle_zones = vehicle_boxes
