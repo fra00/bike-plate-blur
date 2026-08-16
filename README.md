@@ -34,7 +34,7 @@ Optional: skip blur on motorcycles that are **too small** to read a plate
 | **ffmpeg** + **ffprobe** | Must be on your `PATH` |
 | **Disk space** | ~2 GB for venv + models |
 | **GPU (optional)** | NVIDIA + CUDA PyTorch = much faster; **CPU works** but is slow |
-| **Model file** | `license-plate-finetune-v1m.pt` in the project folder (not in git — see below) |
+| **Model files** | Included in the repo: `license-plate-finetune-v1m.pt` (~39 MB) and `yolov8n.pt` (~6 MB) |
 
 ---
 
@@ -127,29 +127,20 @@ $env:PLATE_DEVICE="cpu"
 export PLATE_DEVICE=cpu
 ```
 
-### 6. Add the plate model weights
+### 6. Model weights (already in the repo)
 
-GitHub does **not** include large `.pt` files. Put this file in the **project root**
-(same folder as `blur_plates.py`):
+After `git clone`, you should already have these next to `blur_plates.py`:
 
 ```text
-license-plate-finetune-v1m.pt
+license-plate-finetune-v1m.pt   ← plate detector (~39 MB)
+yolov8n.pt                      ← vehicle detector (~6 MB)
 ```
 
-**How to get it**
+No extra download step. (ONNX/TensorRT `.engine` files stay local/optional and are
+**not** portable between GPUs — the `.pt` files are enough.)
 
-1. Copy it from a machine that already has the project, **or**
-2. Download from the repo’s [Releases](https://github.com/fra00/plates-blur/releases)
-   when an asset is published, **or**
-3. Temporary fallback (baseline, weaker on motos): HuggingFace
-   [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection)
-   — save/rename to `license-plate-finetune-v1m.pt` only if you accept lower moto accuracy.
-
-The vehicle model `yolov8n.pt` is downloaded automatically by Ultralytics on first run
-(or copy it next to `blur_plates.py` if you already have it).
-
-**Do not** copy `.engine` TensorRT files between PCs — they are GPU-specific.
-The code uses `.pt` when the engine is missing or incompatible.
+If a file is missing (shallow copy / incomplete download), re-clone or restore it
+into the project root with that exact name.
 
 ### 7. First test (short clip)
 
@@ -308,8 +299,8 @@ You are helping set up and run https://github.com/fra00/plates-blur
 Goals:
 1) Discover OS, Python version, ffmpeg on PATH, NVIDIA GPU — do not ask; check.
 2) Guide clone → venv → torch (CUDA if usable else CPU) → pip install -r requirements.txt.
-3) Ensure license-plate-finetune-v1m.pt exists in the project root (not in git;
-   copy from another machine or Releases). yolov8n.pt auto-downloads via Ultralytics.
+3) Confirm license-plate-finetune-v1m.pt and yolov8n.pt exist in the project root
+   (they are committed in the repo, ~45 MB total).
 4) Never recommend copying .engine TensorRT files across machines.
 5) First verify with a 5s --debug run, then a real blur with --zone-filter kalman.
 6) Prefer --start/--end and --detect-cache when iterating on a slow CPU.
@@ -335,5 +326,5 @@ Only needed if the shipped model systematically misses your camera/angles.
 - Detection: Ultralytics YOLO + SAHI-style tiling  
 - Baseline plate family:
   [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection)  
-- This repo ships workflow + moto-oriented pipeline; fine-tuned weights are
-  distributed separately (Release asset or local copy).
+- This repo includes the fine-tuned plate weights (`license-plate-finetune-v1m.pt`)
+  and the vehicle detector (`yolov8n.pt`) so a clone is runnable after `pip install`.

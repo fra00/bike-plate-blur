@@ -1,5 +1,8 @@
-# Model weights — download from HuggingFace / keep local, don't commit
+# Ship the two small Ultralytics .pt checkpoints in git (~45 MB total).
+# Ignore any other local weight formats / extra experiments.
 *.pt
+!license-plate-finetune-v1m.pt
+!yolov8n.pt
 *.onnx
 *.engine
 

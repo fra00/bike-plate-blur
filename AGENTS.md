@@ -9,7 +9,7 @@ tracking (prefer `--zone-filter kalman`). Config: `config.toml`.
 1. Python 3.11/3.12 + ffmpeg/ffprobe on PATH
 2. `python -m venv venv` → activate → install torch (CUDA if usable else CPU)
 3. `pip install -r requirements.txt`
-4. Place `license-plate-finetune-v1m.pt` in project root (gitignored; not in clone)
+4. Confirm `license-plate-finetune-v1m.pt` and `yolov8n.pt` are in the project root (shipped in git)
 5. Do not rely on `.engine` files across machines; use `.pt`
 6. Smoke test: short `--start/--end` with `--debug`, then without debug + kalman
 
@@ -23,4 +23,6 @@ python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --detect-cach
 - `PLATE_DEVICE=cpu` or `cuda` to force device
 
 ## Do not commit
-Weights (`.pt`/`.onnx`/`.engine`), videos, `cache/`, `venv/`, `dataset/` — see `.gitignore`.
+Videos, `cache/`, `venv/`, `dataset/`, `*.onnx`, `*.engine`, and extra local
+`*.pt` experiments — see `.gitignore`. The two shipped checkpoints
+(`license-plate-finetune-v1m.pt`, `yolov8n.pt`) **are** tracked.
