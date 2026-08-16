@@ -1,4 +1,4 @@
-# plates-blur
+# bike-plate-blur
 
 **Detects and blurs license plates in video** (dashcam, action cam, motorcycle
 footage). Optimized for **motorbikes**: lean angles, motion blur, small distant
@@ -6,7 +6,7 @@ plates, and tracking so the blur does not flicker or drift.
 
 | | |
 |---|---|
-| **Repo** | https://github.com/fra00/plates-blur |
+| **Repo** | https://github.com/fra00/bike-plate-blur |
 | **Entry point** | `python blur_plates.py <input> <output>` |
 | **Config** | `config.toml` (no code edits needed for normal use) |
 | **Output** | Visually lossless HEVC + **original audio** |
@@ -73,8 +73,8 @@ ffprobe -version
 ### 3. Download this project
 
 ```bash
-git clone https://github.com/fra00/plates-blur.git
-cd plates-blur
+git clone https://github.com/fra00/bike-plate-blur.git
+cd bike-plate-blur
 ```
 
 Or download the ZIP from GitHub → Extract → open a terminal **inside** that folder.
@@ -214,11 +214,11 @@ python batch_blur.py /path/to/videos --outdir /path/to/output --vehicles motorbi
 Any software that can run a command:
 
 ```bash
-python C:\path\to\plates-blur\blur_plates.py "C:\in\video.mp4" "C:\out\video.mp4" --zone-filter kalman
+python C:\path\to\bike-plate-blur\blur_plates.py "C:\in\video.mp4" "C:\out\video.mp4" --zone-filter kalman
 ```
 
 Exit code `0` = success. Activate the same `venv` (or use
-`C:\path\to\plates-blur\venv\Scripts\python.exe` on Windows).
+`C:\path\to\bike-plate-blur\venv\Scripts\python.exe` on Windows).
 
 ---
 
@@ -259,7 +259,7 @@ moto_min_blur_box_h_frac = 0.10    # skip tiny distant motos (~10% of frame heig
 ## Project layout (what matters)
 
 ```text
-plates-blur/
+bike-plate-blur/
   blur_plates.py          ← main CLI
   batch_blur.py           ← folder batch
   config.toml             ← tunables
@@ -294,7 +294,7 @@ plates-blur/
 Paste this into ChatGPT, Claude, Cursor, etc. when helping a user set up or run the tool:
 
 ```text
-You are helping set up and run https://github.com/fra00/plates-blur
+You are helping set up and run https://github.com/fra00/bike-plate-blur
 (license-plate blur for dashcam / motorcycle video).
 
 Goals:

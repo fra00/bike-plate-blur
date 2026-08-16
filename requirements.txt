@@ -1,4 +1,4 @@
-# Runtime dependencies for plates-blur
+# Runtime dependencies for bike-plate-blur
 # Install PyTorch first (CPU or CUDA) — see README.md — then:
 #   pip install -r requirements.txt
 

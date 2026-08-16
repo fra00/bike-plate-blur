@@ -1,4 +1,4 @@
-# Agent instructions for https://github.com/fra00/plates-blur
+# Agent instructions for https://github.com/fra00/bike-plate-blur
 
 ## What this repo is
 CLI tool that detects and blurs license plates in video (`blur_plates.py`),
