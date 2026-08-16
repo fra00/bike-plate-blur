@@ -1,0 +1,57 @@
+# Model weights — download from HuggingFace / keep local, don't commit
+*.pt
+*.onnx
+*.engine
+
+# Exported fine-tune crops (regenerate with export_moto_crops.py)
+dataset/
+
+# Python virtualenvs
+.venv/
+venv/
+
+# Debug and output frames
+Debug/
+Debugging frame/
+training_frames/
+runs/
+
+# Training datasets and review state
+training_data/
+training_data_v2/
+
+# Personal config / scratch notes
+notes on configuration.txt
+
+# Social media / marketing tooling (kept local)
+make_instagram_slides.py
+
+# Optional helper scripts not part of the shipped pipeline
+compare_v2.py
+promote_augmented_edits.py
+
+# Video files
+*.mov
+*.mp4
+*.mkv
+*.avi
+*.mts
+*.m4v
+
+# HuggingFace cache
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs and test artefacts
+*.log
+test_frame.png
+test_frame_blurred.png
+
+# Detection caches (--detect-cache) and frame comparisons: reproducible outputs
+# of a specific clip, large and machine-specific
+cache/
+cmp_*.png
