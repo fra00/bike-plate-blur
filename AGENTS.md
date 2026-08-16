@@ -1,0 +1,26 @@
+# Agent instructions for https://github.com/fra00/plates-blur
+
+## What this repo is
+CLI tool that detects and blurs license plates in video (`blur_plates.py`),
+with motorcycle-oriented detection (letterbox crops, rear ROI) and temporal
+tracking (prefer `--zone-filter kalman`). Config: `config.toml`.
+
+## Setup checklist (do not skip)
+1. Python 3.11/3.12 + ffmpeg/ffprobe on PATH
+2. `python -m venv venv` → activate → install torch (CUDA if usable else CPU)
+3. `pip install -r requirements.txt`
+4. Place `license-plate-finetune-v1m.pt` in project root (gitignored; not in clone)
+5. Do not rely on `.engine` files across machines; use `.pt`
+6. Smoke test: short `--start/--end` with `--debug`, then without debug + kalman
+
+## Commands
+```bash
+python blur_plates.py input.mp4 output.mp4 --zone-filter kalman
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --detect-cache cache/run.jsonl --zone-filter kalman
+```
+
+## Env
+- `PLATE_DEVICE=cpu` or `cuda` to force device
+
+## Do not commit
+Weights (`.pt`/`.onnx`/`.engine`), videos, `cache/`, `venv/`, `dataset/` — see `.gitignore`.

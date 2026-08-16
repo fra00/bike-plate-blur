@@ -1,359 +1,339 @@
-# Video License Plate Blur
+# plates-blur
 
-Automatically detects and blurs license plates in dashcam, action-cam and motorsport
-footage. Built on YOLOv11 + SAHI sliced inference, with a custom-trained model
-specifically optimized for **motorbike riding** — extreme lean angles, motion blur,
-tunnels, rain, and small distant plates.
+**Detects and blurs license plates in video** (dashcam, action cam, motorcycle
+footage). Optimized for **motorbikes**: lean angles, motion blur, small distant
+plates, and tracking so the blur does not flicker or drift.
 
-Output is **lossless** (FFV1 intermediate → HEVC CRF 0) with the **original audio
-preserved**.
-
----
-
-## What's included
-
-| Component | Purpose |
+| | |
 |---|---|
-| `blur_plates.py` | Production: detect + track + blur plates in a video |
-| `batch_blur.py` | Run the production blur on every video in a folder |
-| The included **`license-plate-finetune-v1m.pt`** | Fine-tuned model — drop-in replacement for the HuggingFace baseline, much better on motorsport / dashcam footage |
-| Fine-tuning pipeline (see below) | Specialize the model further on your own footage if v1m doesn't quite hit your edge cases |
-
-The fine-tuned weights were trained on real motorbike footage: cornering, tunnels,
-rain, autobahn, low-light, and heavy motion blur. On a held-out 72-frame validation
-set, v1m scores **mAP@50 = 0.75** and **mAP@50-95 = 0.57** — a meaningful jump from
-the stock weights (0.58 / 0.36 respectively).
+| **Repo** | https://github.com/fra00/plates-blur |
+| **Entry point** | `python blur_plates.py <input> <output>` |
+| **Config** | `config.toml` (no code edits needed for normal use) |
+| **Output** | Visually lossless HEVC + **original audio** |
 
 ---
 
-## AI Setup Prompt
+## What it does (plain language)
 
-New to the project or setting it up on a fresh machine? Copy and paste the prompt
-below into any AI assistant (Claude, ChatGPT, etc.) and it will guide you through
-the entire setup interactively:
+1. Finds **vehicles** (cars, motorcycles, buses, trucks).
+2. Finds **license plates** (full frame + zoomed crops, especially moto rear).
+3. **Tracks** plates over time so blur stays on the plate between detections.
+4. Draws a **blur** (or solid color / sticker image) on each plate region.
+5. Writes a new video file; your original file is never modified.
 
----
-
-> I want to set up and use this tool that automatically detects and blurs license
-> plates in dashcam and action-cam videos.
->
-> Before doing anything else, silently run the necessary checks to figure out my
-> environment yourself — detect my OS, check if Python is installed and what
-> version, check if ffmpeg is installed and on PATH, and check if I have an NVIDIA
-> GPU available. Do not ask me for any of this information.
->
-> Then take me through the full setup in this order, giving me one step at a time
-> and waiting for me to confirm before moving on:
->
-> 1. **Clone the repo** to a sensible location based on my OS.
-> 2. **Install ffmpeg** if it is not already installed, using the best method for
->    my OS (winget, brew, apt, etc.) and verify it is on PATH.
-> 3. **Create a Python virtual environment** inside the cloned folder, activate
->    it, and install all dependencies — use CUDA-enabled PyTorch if I have an
->    NVIDIA GPU, CPU-only otherwise. Detect this automatically.
-> 4. **Download the fine-tuned model weights** `license-plate-finetune-v1m.pt`
->    from the repo's latest GitHub Release into the project folder, if it's
->    not already there.
-> 5. **Run a quick debug test** on any video file I have so I can see detections
->    before any real blurring happens.
-> 6. **Explain `config.toml`** in plain language — only the settings I am likely
->    to actually change.
->
-> Keep instructions short and copy-pasteable. If something fails, diagnose it and
-> fix it before moving on.
+Optional: skip blur on motorcycles that are **too small** to read a plate
+(`moto_min_blur_box_h_frac` in `config.toml`).
 
 ---
 
-## Requirements
+## Requirements (checklist)
 
-- Python 3.11+
-- [ffmpeg](https://ffmpeg.org/download.html) (must be on `PATH`)
-- NVIDIA GPU recommended (CPU works but is slow)
+| Need | Notes |
+|------|--------|
+| **Python 3.11 or 3.12** | 3.14 may work; 3.12 is safest |
+| **ffmpeg** + **ffprobe** | Must be on your `PATH` |
+| **Disk space** | ~2 GB for venv + models |
+| **GPU (optional)** | NVIDIA + CUDA PyTorch = much faster; **CPU works** but is slow |
+| **Model file** | `license-plate-finetune-v1m.pt` in the project folder (not in git — see below) |
 
 ---
 
-## Installation
+## Install — step by step (for anyone)
+
+Do these in order. Copy-paste one block at a time.
+
+### 1. Install Python
+
+- **Windows:** https://www.python.org/downloads/ → install **3.12**, tick
+  **“Add python.exe to PATH”**.
+- **macOS:** `brew install python@3.12`
+- **Linux:** `sudo apt install python3.12 python3.12-venv` (or your distro equivalent)
+
+Check:
 
 ```bash
-# Create and activate a virtual environment
+python --version
+```
+
+You should see `Python 3.11` or `3.12` (on some systems the command is `python3`).
+
+### 2. Install ffmpeg
+
+- **Windows:** `winget install ffmpeg` then **open a new terminal**
+- **macOS:** `brew install ffmpeg`
+- **Linux:** `sudo apt install ffmpeg`
+
+Check:
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+### 3. Download this project
+
+```bash
+git clone https://github.com/fra00/plates-blur.git
+cd plates-blur
+```
+
+Or download the ZIP from GitHub → Extract → open a terminal **inside** that folder.
+
+### 4. Create a virtual environment
+
+**Windows (PowerShell / cmd):**
+
+```bash
 python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS / Linux
-
-# Install dependencies
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install ultralytics sahi opencv-python tqdm
+venv\Scripts\activate
 ```
 
-> For CPU-only, replace the torch line with: `pip install torch torchvision`
-
-### Model weights
-
-The fine-tuned **`license-plate-finetune-v1m.pt`** is published as a GitHub
-Release asset (the `.pt` files are not committed to the repo).
-
-Download it into the project folder — `blur_plates.py` looks for it by exact
-filename in the same directory:
+**macOS / Linux:**
 
 ```bash
-# From the project root
-curl -L -o license-plate-finetune-v1m.pt \
-  https://github.com/dsdtx/video_license_plates_blur/releases/latest/download/license-plate-finetune-v1m.pt
+python3 -m venv venv
+source venv/bin/activate
 ```
 
-If you ever want the baseline HuggingFace model for comparison, it's at
-[morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection).
+Your prompt should show `(venv)`.
+
+### 5. Install Python packages
+
+**If you have an NVIDIA GPU** (recommended):
+
+```bash
+python -m pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+```
+
+If `cu124` fails, try `cu121` or see https://pytorch.org/get-started/locally/
+
+**CPU only** (no NVIDIA, or unsupported GPU):
+
+```bash
+python -m pip install --upgrade pip
+pip install torch torchvision
+pip install -r requirements.txt
+```
+
+Force CPU later anytime:
+
+```bash
+# Windows PowerShell
+$env:PLATE_DEVICE="cpu"
+
+# macOS / Linux
+export PLATE_DEVICE=cpu
+```
+
+### 6. Add the plate model weights
+
+GitHub does **not** include large `.pt` files. Put this file in the **project root**
+(same folder as `blur_plates.py`):
+
+```text
+license-plate-finetune-v1m.pt
+```
+
+**How to get it**
+
+1. Copy it from a machine that already has the project, **or**
+2. Download from the repo’s [Releases](https://github.com/fra00/plates-blur/releases)
+   when an asset is published, **or**
+3. Temporary fallback (baseline, weaker on motos): HuggingFace
+   [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection)
+   — save/rename to `license-plate-finetune-v1m.pt` only if you accept lower moto accuracy.
+
+The vehicle model `yolov8n.pt` is downloaded automatically by Ultralytics on first run
+(or copy it next to `blur_plates.py` if you already have it).
+
+**Do not** copy `.engine` TensorRT files between PCs — they are GPU-specific.
+The code uses `.pt` when the engine is missing or incompatible.
+
+### 7. First test (short clip)
+
+Put any short video in the folder (or use a full path):
+
+```bash
+python blur_plates.py your_video.mp4 out_test.mp4 --start 0:00 --end 0:05 --debug
+```
+
+- `--debug` draws boxes (no privacy blur) so you can verify detection works.
+- Then run **without** `--debug` for a real blur:
+
+```bash
+python blur_plates.py your_video.mp4 out_blurred.mp4 --start 0:00 --end 0:05 --zone-filter kalman
+```
+
+Open `out_blurred.mp4` in a player. If it fails, see [Troubleshooting](#troubleshooting).
 
 ---
 
-## Configuration
+## Everyday usage
 
-All defaults live in `config.toml` — edit this file to tune thresholds, blur
-strength, SAHI settings, and encoding options without touching the code.
+### Blur a whole video
 
-Key settings:
+```bash
+python blur_plates.py input.mp4 output.mp4 --zone-filter kalman
+```
+
+### Only a time range (faster while testing)
+
+```bash
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --zone-filter kalman
+```
+
+### Only motorbikes
+
+```bash
+python blur_plates.py input.mp4 output.mp4 --vehicles motorbike --zone-filter kalman
+```
+
+### Always cover your own plate (fixed rectangle)
+
+```bash
+python blur_plates.py input.mp4 output.mp4 --own-plate 1700,900,2200,1100
+```
+
+Coordinates are `x1,y1,x2,y2` in pixels of the video frame.
+
+### Speed tip: detection cache
+
+Detection is the slow part. Cache it once, then re-run tracking/blur for free:
+
+```bash
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 ^
+  --detect-cache cache/my_clip.jsonl --zone-filter kalman
+```
+
+(On macOS/Linux use `\` instead of `^` for line breaks.)
+
+First run **writes** the cache; later runs **read** it (as long as detection
+settings in `config.toml` did not change).
+
+### Batch a folder
+
+```bash
+python batch_blur.py /path/to/videos --outdir /path/to/output --vehicles motorbike
+```
+
+### Call from another app (shell / subprocess)
+
+Any software that can run a command:
+
+```bash
+python C:\path\to\plates-blur\blur_plates.py "C:\in\video.mp4" "C:\out\video.mp4" --zone-filter kalman
+```
+
+Exit code `0` = success. Activate the same `venv` (or use
+`C:\path\to\plates-blur\venv\Scripts\python.exe` on Windows).
+
+---
+
+## Useful options
+
+| Flag | Meaning |
+|------|---------|
+| `--zone-filter kalman` | Smoother blur tracking (recommended) |
+| `--start` / `--end` | Process only a time range (`MM:SS`) |
+| `--vehicles motorbike` | Ignore cars/trucks/buses |
+| `--detect-cache PATH` | Save/replay detections (JSONL) |
+| `--detect-scale 0.5` | Faster detection (default often `0.5` in config) |
+| `--debug` | Show boxes instead of blur |
+| `--debug-overlay` | Rich debug overlay |
+| `--mode color --color 0,0,0` | Black boxes instead of blur |
+| `--mode image --image logo.png` | Sticker/logo on plates |
+| `--blur N` | Blur strength (odd number) |
+
+Most defaults live in **`config.toml`**. Common knobs:
 
 ```toml
 [detection]
-plate_conf = 0.15              # confidence threshold (full frame)
-plate_conf_in_vehicle = 0.02   # lower threshold inside vehicle bounding boxes
+detect_scale = 0.5                 # 0.5 = faster; 1.0 = max quality, slower
+plate_conf = 0.45
+plate_conf_in_vehicle = 0.15
 
 [blur]
-strength = 61                  # Gaussian kernel size (odd number)
+strength = 25
+blur_shape = "round"
+
+[tracking]
+zone_filter = "ema"                # override with --zone-filter kalman
+moto_min_blur_box_h_frac = 0.10    # skip tiny distant motos (~10% of frame height)
 ```
 
 ---
 
-## Usage
+## Project layout (what matters)
 
-### Single video
-
-```bash
-python blur_plates.py input.mp4 output.mp4
+```text
+plates-blur/
+  blur_plates.py          ← main CLI
+  batch_blur.py           ← folder batch
+  config.toml             ← tunables
+  requirements.txt        ← pip packages
+  license-plate-finetune-v1m.pt   ← YOU add this (not in git)
+  plates/                 ← library code
+  eval_detection.py       ← measure detection quality on a cache
+  export_moto_crops.py    ← export crops for fine-tuning
+  FINETUNE_V2M.md         ← optional train-your-own notes
 ```
-
-```bash
-# Clip a time range
-python blur_plates.py input.mp4 output.mp4 --start 2:30 --end 3:00
-
-# Motorbike plates only
-python blur_plates.py input.mp4 output.mp4 --vehicles motorbike
-
-# Camera mounted behind your own plate (always cover a fixed region)
-python blur_plates.py input.mp4 output.mp4 --own-plate 1700,900,2200,1100
-
-# Debug mode — draws detection boxes instead of blurring (blue=vehicle, green=plate)
-python blur_plates.py input.mp4 debug.mp4 --debug
-
-# DEBUG DATA — extended in-frame overlay with source tags & trajectory trails
-python blur_plates.py input.mp4 debug.mp4 --debug-overlay
-
-# DEBUG DATA — add a side-panel HUD with frame/track/timing telemetry
-python blur_plates.py input.mp4 debug.mp4 --debug-overlay --debug-hud
-
-# Replace plates with a solid colour (R,G,B) instead of blurring
-python blur_plates.py input.mp4 output.mp4 --mode color --color 0,0,0
-
-# Stamp a custom image (logo / sticker / portrait) onto every plate
-python blur_plates.py input.mp4 output.mp4 --mode image --image my_sticker.png
-```
-
-### Redaction modes
-
-| `--mode` | What gets drawn over each plate | Extra flag |
-|---|---|---|
-| `blur` (default) | Strong Gaussian blur | `--blur N` for kernel size |
-| `color` | Solid colour fill | `--color R,G,B` (0-255 each) |
-| `image` | A PNG/JPG stretched to fill the plate. PNG alpha is honoured. | `--image PATH` |
-
-The selected mode applies to **every plate** in the output, including the
-`--own-plate` fixed region — so the result has a consistent look.
-
-Defaults for these flags can also be set in `config.toml` under the `[redact]`
-section so you don't have to pass them every time.
-
-### Batch — entire folder
-
-```bash
-python batch_blur.py /path/to/folder --outdir /path/to/output --vehicles motorbike
-```
-
-### Key options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--vehicles` | `all` | Filter by vehicle type: `all`, `motorbike`, `car`, `bus`, `truck` |
-| `--plate-conf` | `0.15` | Plate confidence threshold (full frame) |
-| `--plate-conf-in-vehicle` | `0.02` | Plate confidence inside vehicle boxes |
-| `--blur` | `61` | Gaussian blur kernel size |
-| `--conf` | `0.30` | Vehicle detector confidence |
-| `--start` / `--end` | — | Process a time range (`MM:SS` or `HH:MM:SS`) |
-| `--own-plate` | — | Fixed region to always blur (`x1,y1,x2,y2`) |
-| `--debug` | off | Overlay detection boxes instead of blurring |
-| `--debug-overlay` | off | DEBUG DATA mode (A): rich in-frame overlay with source tags (SAHI/crop+/pred), trajectory trails, ghost tracks |
-| `--debug-hud` | off | DEBUG DATA mode (B): brand-styled side panel with frame#, counts, track list, per-stage timings (output gets +320 px wider) |
-| `--mode` | `blur` | Redaction style: `blur`, `color`, or `image` |
-| `--color` | `0,0,0` | Solid fill colour for `--mode color` (R,G,B) |
-| `--image` | — | Path to overlay image for `--mode image` (PNG with alpha supported) |
 
 ---
 
-## Specializing the model on your own footage
+## Troubleshooting
 
-The shipped v1m model is great on motorsport / dashcam material, but every camera
-and every riding style has its own quirks (different plate styles, unusual mounts,
-camera angles, weather, etc.). If you notice the model missing or over-detecting
-on **your specific** footage, the repo includes a complete fine-tuning pipeline
-to specialize it further.
+| Problem | Fix |
+|---------|-----|
+| `python` not found | Reinstall Python with PATH enabled; try `python3` |
+| `ffmpeg` not found | Install ffmpeg, **new** terminal, check `ffmpeg -version` |
+| `No module named …` | Activate `venv`, then `pip install -r requirements.txt` |
+| Missing `license-plate-finetune-v1m.pt` | Copy/download into project root (step 6) |
+| CUDA / GPU errors | `PLATE_DEVICE=cpu` or install a PyTorch build that matches your GPU |
+| Extremely slow | Normal on CPU; use short `--start/--end`, `detect_scale = 0.5`, GPU machine, or `--detect-cache` |
+| Cache mismatch error | Delete the JSONL or pass a **new** `--detect-cache` path after changing detection settings |
+| Blur too big / missing | Tune `[tracking]` in `config.toml`; prefer `--zone-filter kalman` |
 
-A full extract → review → augment → train cycle on ~500 of your own frames
-typically takes a few hours and produces a model meaningfully better on **your**
-edge cases.
+---
 
-### Workflow
+## For LLMs / AI assistants
 
-```
-your videos ─┐
-             ▼
-extract_training_frames.py  ──▶  auto-labelled frames + dataset.yaml
-             ▼
-review_annotations.py       ──▶  you fix wrong / missed boxes (mouse + keyboard)
-             ▼
-augment_training_data.py    ──▶  5× variants per frame: motion blur, lean, perspective
-             ▼
-review_annotations.py       ──▶  optional second pass on augmented frames
-             ▼
-finetune.py                 ──▶  two-phase fine-tune (frozen backbone → full)
-```
+Paste this into ChatGPT, Claude, Cursor, etc. when helping a user set up or run the tool:
 
-### 1. Extract training frames
+```text
+You are helping set up and run https://github.com/fra00/plates-blur
+(license-plate blur for dashcam / motorcycle video).
 
-Smart sampling — uncertain detections (conf 0.05–0.25) are kept aggressively,
-confident ones and "no plate" frames are sub-sampled — so the dataset is dense
-in the frames that carry the most learning signal.
+Goals:
+1) Discover OS, Python version, ffmpeg on PATH, NVIDIA GPU — do not ask; check.
+2) Guide clone → venv → torch (CUDA if usable else CPU) → pip install -r requirements.txt.
+3) Ensure license-plate-finetune-v1m.pt exists in the project root (not in git;
+   copy from another machine or Releases). yolov8n.pt auto-downloads via Ultralytics.
+4) Never recommend copying .engine TensorRT files across machines.
+5) First verify with a 5s --debug run, then a real blur with --zone-filter kalman.
+6) Prefer --start/--end and --detect-cache when iterating on a slow CPU.
+7) Tunables live in config.toml; entry point is blur_plates.py.
+8) Give one short copy-pasteable step at a time; diagnose failures before continuing.
 
-```bash
-# All videos in a folder → ~2000 frames @ 1 fps, PNG (lossless)
-python extract_training_frames.py /path/to/videos/ --outdir training_data/ \
-       --fps 1 --max-frames 2000 --format png --no-review
+Integration: callable as a shell/subprocess:
+  python blur_plates.py <input> <output> [--start MM:SS] [--end MM:SS] [--zone-filter kalman]
 ```
 
-Output structure:
-```
-training_data/
-  images/train/  images/val/   ← 85 / 15 split
-  labels/train/  labels/val/   ← YOLO .txt files (auto-generated)
-  dataset.yaml
-```
+---
 
-### 2. Review the auto-labels
+## Optional: fine-tune on your own footage
 
-```bash
-python review_annotations.py --dataset training_data/
-```
-
-| Control | Action |
-|---|---|
-| **Left-drag** | Draw a new bounding box (auto-saves on release) |
-| **Right-click** on a box | Delete it (auto-saves) |
-| `k` | Keep frame as-is, mark reviewed, advance |
-| `d` | Empty the label file (no plates in this frame) |
-| `s` | Skip without marking, advance |
-| `←` / `→` | Navigate |
-| `q` | Quit (progress saved to `review_progress.json`) |
-
-Useful filters:
-- `--augmented-only` — only show augmented variants
-- `--source-only`   — only show source (non-augmented) frames
-- `--claude-edited` — only show frames listed in `claude_review_log.json`
-
-### 3. Augment the training set
-
-Boosts the dataset 5× with **motion blur, corner-lean rotation, perspective warp,
-shear, and HSV jitter** — the conditions stock detectors struggle with. Bounding
-boxes are transformed in lock-step (corners warped, axis-aligned bbox of the
-warped corners becomes the new label).
-
-```bash
-# Default: 5 variants per source frame; motion-blur + lean enabled
-python augment_training_data.py --dataset training_data/
-
-# Heavier corner-lean for motorsport / track riding
-python augment_training_data.py --dataset training_data/ \
-       --variants 6 --lean-prob 0.5 --max-lean 40
-
-# Wipe previous augmented copies first
-python augment_training_data.py --dataset training_data/ --clean
-```
-
-Lean rotations use cover-zoom (scale = `|cos|+|sin|·aspect`) so the rotated image
-fully fills the frame — no streaky `BORDER_REPLICATE` edges the model could
-latch onto as spurious features.
-
-### 4. (Optional) Cycle: fix sources flagged via augmented review
-
-When you fix a bad box on an augmented frame, the **source** frame almost
-certainly has the same underlying label problem (plus its other 4 augmented
-copies inherited it). If this matters for your accuracy:
-
-1. Note which augmented stems you fixed (e.g. `IMG_xxx_aug2`).
-2. Re-review the corresponding **source** frames with
-   `python review_annotations.py --dataset training_data/ --source-only` and
-   correct the underlying label.
-3. Delete the source's stale augmented copies
-   (`rm training_data/images/train/<source>_aug*.png` and the matching
-   `.txt` files) and re-run `augment_training_data.py` to regenerate.
-
-In practice, training tolerates a few percent of label noise just fine — you
-usually don't need this loop.
-
-### 5. Fine-tune
-
-Two phases: **(1)** backbone frozen, head trains fast; **(2)** full unfreeze at
-lower LR. Starts from the shipped fine-tuned weights so convergence is hours,
-not days.
-
-```bash
-python finetune.py --data training_data/dataset.yaml --name my_run
-```
-
-| Flag | Default | What it does |
-|---|---|---|
-| `--epochs` | 60 | Total epochs (Phase 1 + Phase 2) |
-| `--freeze-epochs` | 15 | Frozen-backbone epochs at the start |
-| `--freeze` | 10 | How many backbone layers to freeze |
-| `--batch` | 16 | Batch size |
-| `--imgsz` | 640 | Training image size |
-| `--lr` | 0.001 | Initial LR (Phase 2 uses 1/10 of this) |
-| `--name` | `exp` | Run name → `runs/finetune/<name>/` |
-
-Best model lands at `runs/finetune/<name>/weights/best.pt`.
-
-### 6. Verify the improvement
-
-The simplest sanity check: run `blur_plates.py --debug` on a short clip with
-each model in turn (rename `license-plate-finetune-v1m.pt` between runs) and
-eyeball the green plate boxes. For a stricter side-by-side, the validation
-mAP printed at the end of training is also a good comparison point — the
-v1m model in this repo scores **mAP@50 ≈ 0.75 / mAP@50-95 ≈ 0.57** on its
-held-out set.
-
-### 7. Promote your new model into production
-
-```bash
-# Back up the shipped model first
-cp license-plate-finetune-v1m.pt license-plate-finetune-v1m-shipped.pt
-
-# Drop in your own
-cp runs/finetune/my_run/weights/best.pt license-plate-finetune-v1m.pt
-```
-
-`blur_plates.py` reads from `license-plate-finetune-v1m.pt` by name — no code
-changes needed.
+See `FINETUNE_V2M.md` and the scripts `extract_training_frames.py`,
+`review_annotations.py`, `augment_training_data.py`, `finetune.py`.
+Only needed if the shipped model systematically misses your camera/angles.
 
 ---
 
 ## License & credits
 
-Detection architecture: YOLOv11 / Ultralytics. Sliced inference: SAHI.
-Baseline weights: [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection).
+- Detection: Ultralytics YOLO + SAHI-style tiling  
+- Baseline plate family:
+  [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection)  
+- This repo ships workflow + moto-oriented pipeline; fine-tuned weights are
+  distributed separately (Release asset or local copy).
