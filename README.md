@@ -2,7 +2,8 @@
 
 **Detects and blurs license plates in video** (dashcam, action cam, motorcycle
 footage). Optimized for **motorbikes**: lean angles, motion blur, small distant
-plates, and tracking so the blur does not flicker or drift.
+plates. Plates are kept only inside vehicles; short gaps are interpolated from
+the full detection cache so the blur does not flicker or jump across cuts.
 
 | | |
 |---|---|
@@ -17,12 +18,12 @@ plates, and tracking so the blur does not flicker or drift.
 
 1. Finds **vehicles** (cars, motorcycles, buses, trucks).
 2. Finds **license plates** (full frame + zoomed crops, especially moto rear).
-3. **Tracks** plates over time so blur stays on the plate between detections.
+3. **Interpolates** the plate inside its vehicle across short detection gaps.
 4. Draws a **blur** (or solid color / sticker image) on each plate region.
 5. Writes a new video file; your original file is never modified.
 
 Optional: skip blur on motorcycles that are **too small** to read a plate
-(`moto_min_blur_box_h_frac` in `config.toml`).
+(`moto_min_blur_box_h_frac` in `config.toml` `[zones]`).
 
 ---
 
@@ -34,7 +35,7 @@ Optional: skip blur on motorcycles that are **too small** to read a plate
 | **ffmpeg** + **ffprobe** | Must be on your `PATH` |
 | **Disk space** | ~2 GB for venv + models |
 | **GPU (optional)** | NVIDIA + CUDA PyTorch = much faster; **CPU works** but is slow |
-| **Model files** | Included in the repo: `license-plate-finetune-v1m.pt` (~39 MB) and `yolov8n.pt` (~6 MB) |
+| **Model files** | Included in the repo: `license-plate-finetune-v1m.pt` (~39 MB) and `yolov8s.pt` (~22 MB) |
 
 ---
 
@@ -133,7 +134,7 @@ After `git clone`, you should already have these next to `blur_plates.py`:
 
 ```text
 license-plate-finetune-v1m.pt   ← plate detector (~39 MB)
-yolov8n.pt                      ← vehicle detector (~6 MB)
+yolov8s.pt                      ← vehicle detector (~22 MB)
 ```
 
 No extra download step. (ONNX/TensorRT `.engine` files stay local/optional and are
@@ -150,11 +151,11 @@ Put any short video in the folder (or use a full path):
 python blur_plates.py your_video.mp4 out_test.mp4 --start 0:00 --end 0:05 --debug
 ```
 
-- `--debug` draws boxes (no privacy blur) so you can verify detection works.
+- `--debug` draws boxes so you can verify detection: **green** = vehicle, **blue** = plate model (the box it actually emitted).
 - Then run **without** `--debug` for a real blur:
 
 ```bash
-python blur_plates.py your_video.mp4 out_blurred.mp4 --start 0:00 --end 0:05 --zone-filter kalman
+python blur_plates.py your_video.mp4 out_blurred.mp4 --start 0:00 --end 0:05
 ```
 
 Open `out_blurred.mp4` in a player. If it fails, see [Troubleshooting](#troubleshooting).
@@ -166,19 +167,19 @@ Open `out_blurred.mp4` in a player. If it fails, see [Troubleshooting](#troubles
 ### Blur a whole video
 
 ```bash
-python blur_plates.py input.mp4 output.mp4 --zone-filter kalman
+python blur_plates.py input.mp4 output.mp4
 ```
 
 ### Only a time range (faster while testing)
 
 ```bash
-python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --zone-filter kalman
+python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30
 ```
 
 ### Only motorbikes
 
 ```bash
-python blur_plates.py input.mp4 output.mp4 --vehicles motorbike --zone-filter kalman
+python blur_plates.py input.mp4 output.mp4 --vehicles motorbike
 ```
 
 ### Always cover your own plate (fixed rectangle)
@@ -191,29 +192,18 @@ Coordinates are `x1,y1,x2,y2` in pixels of the video frame.
 
 ### Speed tip: detection cache
 
-Detection is the slow part. Cache it once, then re-run tracking/blur for free:
+Detection is the slow part. Cache it once, then re-run blur for free:
 
 ```bash
 python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 ^
-  --detect-cache cache/my_clip.jsonl --zone-filter kalman
+  --detect-cache cache/my_clip.jsonl
 ```
 
 (On macOS/Linux use `\` instead of `^` for line breaks.)
 
 First run **writes** the cache; later runs **read** it (as long as detection
-settings in `config.toml` did not change).
-
-### Offline anti-blink (past + future)
-
-After you have a cache, fill short tracker blinks with motion-gated bridges.
-The online tracker still owns blur quality (use `--zone-filter kalman`):
-
-```bash
-python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 ^
-  --detect-cache cache/my_clip.jsonl --zone-filter kalman --offline-zones
-```
-
-Uses `[offline]` in `config.toml`. Large jumps are not bridged (different moto).
+settings in `config.toml` did not change). Blur zones are always interpolated
+from the full cache (plates only inside vehicles; short plausible gaps filled).
 
 ### Batch a folder
 
@@ -226,7 +216,7 @@ python batch_blur.py /path/to/videos --outdir /path/to/output --vehicles motorbi
 Any software that can run a command:
 
 ```bash
-python C:\path\to\bike-plate-blur\blur_plates.py "C:\in\video.mp4" "C:\out\video.mp4" --zone-filter kalman
+python C:\path\to\bike-plate-blur\blur_plates.py "C:\in\video.mp4" "C:\out\video.mp4"
 ```
 
 Exit code `0` = success. Activate the same `venv` (or use
@@ -238,11 +228,9 @@ Exit code `0` = success. Activate the same `venv` (or use
 
 | Flag | Meaning |
 |------|---------|
-| `--zone-filter kalman` | Smoother blur tracking (recommended) |
 | `--start` / `--end` | Process only a time range (`MM:SS`) |
 | `--vehicles motorbike` | Ignore cars/trucks/buses |
-| `--detect-cache PATH` | Save/replay detections (JSONL) |
-| `--offline-zones` | Hybrid gap-fill from cache (needs existing `--detect-cache`) |
+| `--detect-cache PATH` | Save/replay detections (JSONL); zones are interpolated from it |
 | `--detect-scale 0.5` | Faster detection (default often `0.5` in config) |
 | `--debug` | Show boxes instead of blur |
 | `--debug-overlay` | Rich debug overlay |
@@ -259,11 +247,11 @@ plate_conf = 0.45
 plate_conf_in_vehicle = 0.15
 
 [blur]
-strength = 25
+strength = 35
 blur_shape = "round"
 
-[tracking]
-zone_filter = "ema"                # override with --zone-filter kalman
+[zones]
+max_gap_frames = 15               # interpolate up to ~0.5 s of missed detections
 moto_min_blur_box_h_frac = 0.1065  # skip tiny distant motos (~115 px @ 1080p)
 ```
 
@@ -278,7 +266,7 @@ bike-plate-blur/
   config.toml             ← tunables
   requirements.txt        ← pip packages
   license-plate-finetune-v1m.pt   ← plate model (in git, ~39 MB)
-  yolov8n.pt                      ← vehicle model (in git, ~6 MB)
+  yolov8s.pt                      ← vehicle model (in git, ~22 MB)
   plates/                 ← library code
   eval_detection.py       ← measure detection quality on a cache
   export_moto_crops.py    ← export crops for fine-tuning
@@ -298,7 +286,7 @@ bike-plate-blur/
 | CUDA / GPU errors | `PLATE_DEVICE=cpu` or install a PyTorch build that matches your GPU |
 | Extremely slow | Normal on CPU; use short `--start/--end`, `detect_scale = 0.5`, GPU machine, or `--detect-cache` |
 | Cache mismatch error | Delete the JSONL or pass a **new** `--detect-cache` path after changing detection settings |
-| Blur too big / missing | Tune `[tracking]` in `config.toml`; prefer `--zone-filter kalman` |
+| Blur too big / missing | Tune `[zones]` in `config.toml` (gap length, motion gate, moto size) |
 
 ---
 
@@ -313,16 +301,16 @@ You are helping set up and run https://github.com/fra00/bike-plate-blur
 Goals:
 1) Discover OS, Python version, ffmpeg on PATH, NVIDIA GPU — do not ask; check.
 2) Guide clone → venv → torch (CUDA if usable else CPU) → pip install -r requirements.txt.
-3) Confirm license-plate-finetune-v1m.pt and yolov8n.pt exist in the project root
-   (they are committed in the repo, ~45 MB total).
+3) Confirm license-plate-finetune-v1m.pt and yolov8s.pt exist in the project root
+   (they are committed in the repo, ~61 MB total).
 4) Never recommend copying .engine TensorRT files across machines.
-5) First verify with a 5s --debug run, then a real blur with --zone-filter kalman.
+5) First verify with a 5s --debug run, then a real blur.
 6) Prefer --start/--end and --detect-cache when iterating on a slow CPU.
 7) Tunables live in config.toml; entry point is blur_plates.py.
 8) Give one short copy-pasteable step at a time; diagnose failures before continuing.
 
 Integration: callable as a shell/subprocess:
-  python blur_plates.py <input> <output> [--start MM:SS] [--end MM:SS] [--zone-filter kalman]
+  python blur_plates.py <input> <output> [--start MM:SS] [--end MM:SS]
 ```
 
 ---
@@ -341,4 +329,4 @@ Only needed if the shipped model systematically misses your camera/angles.
 - Baseline plate family:
   [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection)  
 - This repo includes the fine-tuned plate weights (`license-plate-finetune-v1m.pt`)
-  and the vehicle detector (`yolov8n.pt`) so a clone is runnable after `pip install`.
+  and the vehicle detector (`yolov8s.pt`) so a clone is runnable after `pip install`.

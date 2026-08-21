@@ -94,9 +94,8 @@ def main():
 
     cfg = bp.load_config()
     det  = cfg["detection"]
-    sahi = cfg["sahi"]
     pre  = cfg.get("preprocessing", {})
-    trk  = cfg.get("tracking", {})
+    trk  = cfg.get("tracking", {}) or cfg.get("zones", {})
 
     print(f"  Audit input : {args.input}")
     info = bp.get_video_info(args.input)
@@ -136,9 +135,6 @@ def main():
                     vehicle_filter="all",
                     plate_conf=float(det["plate_conf"]),
                     plate_conf_in_vehicle=float(det["plate_conf_in_vehicle"]),
-                    sahi_slice_size=int(sahi["slice_size"]),
-                    sahi_overlap=float(sahi["overlap"]),
-                    detect_scale=float(det.get("detect_scale", 1.0)),
                     sharpen=bool(pre.get("sharpen", False)),
                     sharpen_amount=float(pre.get("sharpen_amount", 1.5)),
                     sharpen_sigma=float(pre.get("sharpen_sigma", 1.0)),

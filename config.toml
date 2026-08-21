@@ -1,277 +1,112 @@
 # ── Detection ──────────────────────────────────────────────────────────────────
 [detection]
 
-# YOLOv8 vehicle detector confidence (car / motorcycle / bus / truck).
+# YOLOv8s vehicle detector confidence (car / motorcycle / bus / truck).
 # Higher = rejects false vehicle boxes (bins, trees, signs) that would
 # otherwise drag fake plates through the in-vehicle filter.
 # Lower = catches more motorcycles (small / distant / leaning bikes).
 vehicle_conf = 0.35
 
-# Plate model — minimum confidence for plates detected anywhere on the frame.
-# Higher = fewer false positives (blur only where a plate really is).
-# Lower = catches more oncoming cars / large vehicles at distance.
+# Plate model — used only as a cache-header / CLI value. New detections
+# search plates inside vehicle crops at plate_conf_in_vehicle.
 plate_conf = 0.45
 
 # Plate model — lower threshold applied only when a plate overlaps a detected
 # vehicle bounding box. Set lower than plate_conf to catch blurry / angled /
-# distant plates (small moto plates) on vehicles. Vehicle boxes are now
-# stricter (vehicle_conf 0.45), so a lower in-vehicle threshold is safe.
-# 0.15 = matched to the audit floor (--conf 0.15): anything the audit can read,
-# the pipeline must blur. Measured: the 2:14 cluster plates sit at conf 0.16–0.25.
+# distant plates on vehicles.
 plate_conf_in_vehicle = 0.15
 
-# Aspect-ratio (width / height) limits for plates detected outside any vehicle
-# bounding box. Real plates are always wider than tall; anything outside this
-# range is almost certainly a false positive (signs, door numbers, logos, etc.).
-# Plates inside vehicle boxes are never filtered by this rule.
-standalone_min_ar = 1.2
-standalone_max_ar = 4.5
+# Lower YOLO confidence accepted for a motorcycle that fills the frame
+# (the default vehicle_conf is often too high for a close bike).
+moto_close_conf = 0.20
 
-# Detection scale — fraction of the original resolution fed to the plate model.
-# 1.0 = full resolution (default, best accuracy, slowest).
-# 0.5 = half resolution (e.g. 4K → 2K). ~5× faster on 4K footage with minimal
-#       accuracy loss at typical dashcam distances (plates ≥ ~5 m are fine).
-#       Blur is always applied at full resolution regardless of this setting.
-# 0.75 = a balanced middle ground.
-detect_scale = 0.5
-
-
-# ── SAHI sliced inference ──────────────────────────────────────────────────────
-[sahi]
-
-# Tile size in pixels — smaller = more detail at the cost of speed
-slice_size = 640
-
-# Fractional overlap between adjacent tiles (0.0 – 0.5).
-# Lower = fewer tiles = faster; 0.2 is a good speed/coverage balance.
-overlap = 0.2
-
-
-# ── Blur ───────────────────────────────────────────────────────────────────────
+# Detection scale / SAHI full-frame tiling were removed: the plate model
+# only runs on vehicle crops. blur is always at full resolution.
 [blur]
 
-# Gaussian blur kernel size — must be odd; larger = stronger blur
-# (single-pass blur; lower values look lighter / less dark)
-strength = 25
+# Gaussian blur kernel size — must be odd; larger = stronger blur.
+# Distant plates stay relatively light; the redaction code scales the kernel
+# up with zone size so a close readable plate (2:35 adventure bike) washes out.
+strength = 35
 
 # Extra pixels added around each detected plate region.
 # Higher = more generous coverage, catches fast oncoming vehicles.
 padding = 10
 
 # Maximum fraction of frame width/height a single blur box may cover.
-# Prevents gap-fill / prediction boxes from ballooning across the frame.
+# Prevents interpolated boxes from ballooning across the frame.
 # Generous enough to leave room for the padding expansion.
 max_box_frac = 0.25
 
 # Blur shape: "rect" = axis-aligned rectangle (default), "round" = soft
-# ellipse inscribed in each region, "quad" = rotated quad for anchor zones.
+# ellipse inscribed in each region.
 # Round looks less invasive on small/distant plates; rect maximises coverage.
 blur_shape = "round"
 
 
-# ── Temporal tracking ─────────────────────────────────────────────────────────
-[tracking]
+# ── Interpolated blur zones ───────────────────────────────────────────────────
+# After detections are cached, plates are kept only when they sit inside a
+# vehicle box, chained into tracklets, and short plausible gaps are filled by
+# interpolating plate pose relative to the vehicle. Cuts and teleports are
+# not bridged. There is no online Kalman/EMA/ghost tracker.
+[zones]
 
-# Set to false to disable tracking entirely and use per-frame detection only
-enabled = true
+# Max consecutive missed frames to interpolate between two observations
+# (~0.5 s at 30 fps). Longer gaps stay empty. Also holds vehicle boxes
+# (green overlay) across the same short YOLO misses.
+max_gap_frames = 15
 
-# How many consecutive frames without a plate detection to fill using prediction.
-# At 30 fps, 10 frames = ~0.33 s. Kept short so the blur tail (hold_frames)
-# is what lingers — long prediction windows smear the box across the frame.
-max_gap_frames = 10
+# Motion gate: allowed travel ≈ max(max_disp_px, vehicle_diag * max_disp_frac)
+# × gap_frames (plus a small margin inside the code).
+max_disp_px = 80.0
+max_disp_frac = 0.35
 
-# How many past detections to use when estimating plate velocity.
-# More = smoother prediction but slower to adapt to direction changes.
-history_frames = 15
+# Endpoints must share a vehicle box at least this IoU (same vehicle).
+min_vehicle_iou = 0.15
 
-# Maximum pixels added to each side of a predicted (gap-fill) plate box.
-# The box grows 2 px per missed frame to account for positional uncertainty,
-# but is capped here so a large max_gap_frames does not balloon the blur
-# region across the frame. 20 px = 10 missed frames worth of growth.
-predict_expand_max = 20
+# Ignore cached plates below this confidence when building tracklets.
+conf_floor = 0.15
 
-# Minimum vehicle detection confidence to start/maintain a track.
-# Lower = track more vehicles but risk false tracks.
-min_vehicle_conf = 0.30
-
-# Max px/frame a gap-fill prediction (LK or velocity) may move before it is
-# rejected. Prevents the box drifting onto trees/bins/road furniture when a
-# plate is lost for several frames: better to blink than blur the wrong spot.
-predict_max_disp = 40.0
-
-# Hard cap on how far the EMITTED blur zone may travel per frame from the last
-# zone emitted for the same track. A plate confirmed with high confidence at
-# (x, y) cannot legitimately jump to (x+500, y+500) a few frames later —
-# runaway vehicle boxes, velocity extrapolation and LK latch-ons would drag
-# the blur onto trees/roadside objects. The zone centre is clamped to this
-# speed (dimensions preserved), so the blur glides instead of teleporting.
-# 80 px/frame ≈ 2400 px/s at 30 fps — covers genuine camera pans; raise it
-# (e.g. 120) if close passing vehicles outrun the blur, lower it for stricter
-# privacy.
-emit_max_disp = 80.0
-
-# ── Privacy fallback ──────────────────────────────────────────────────────────
-# When a stable vehicle's plate is lost beyond the gap window (or never found),
-# blur the bottom strip of the vehicle box instead of leaving the plate exposed.
-# False negative = privacy violation, false positive = cosmetic — so this biases
-# toward over-blurring. Disable with fallback_enabled = false if too aggressive.
-fallback_enabled    = true
-fallback_frac       = 0.40   # bottom strip = 40% of the vehicle box height
-fallback_pad_frac   = 0.25   # strip expanded by 25% on each side
-fallback_min_frames = 3      # vehicle must be seen ≥ this many frames first
-
-# ── Temporal filter for the blur zone ─────────────────────────────────────────
-# "ema"    = original behaviour: two chained exponential averages (plate box +
-#            zone) plus velocity extrapolation applied only on frames where the
-#            plate was missed.
-# "kalman" = one constant-velocity Kalman filter per zone (plates/kalman.py).
-#            Chained EMAs always settle ~1.33 * velocity behind a moving plate,
-#            and applying the velocity only on missed frames made the zone
-#            alternate between lagging and overshooting at the detection burst
-#            rate — the visible wobble. The filter estimates velocity as a state
-#            and applies it every frame, so there is no lag and no alternation;
-#            gaps are pure prediction with padding grown from the filter's own
-#            uncertainty, and implausible detections are rejected by Mahalanobis
-#            distance instead of fixed px/frame caps.
-zone_filter = "ema"
-
-# Kalman tuning (only used when zone_filter = "kalman"), all in pixels:
-#   process_* = how much genuine acceleration to allow per frame
-#               (higher = follows sharp manoeuvres, lower = smoother)
-#   meas_*    = positional accuracy of a full-confidence detection; automatically
-#               relaxed for weak detections, so a 0.15-conf box nudges rather
-#               than yanks the estimate
-#   gate_max  = Mahalanobis distance beyond which a detection is ignored
-#   max_rejects = consecutive gated-out detections after which the filter is
-#               re-seeded on the detection (the plate really did move there)
-#   sigma_pad = extra padding per px of positional uncertainty, and its cap;
-#               it grows at once and retreats by at most pad_decay px/frame, so
-#               the zone does not breathe on every gap frame
-# sigma_pad_k/max were chosen on the 1 s test clip (jitter p95 5.6 px, size
-# jitter p95 0.12, full coverage); re-check them on a clip with longer gaps.
-kf_process_pos   = 3.0
-kf_process_size  = 1.5
-kf_meas_pos      = 3.0
-kf_meas_size     = 3.0
-kf_gate_max      = 6.0
-kf_max_rejects   = 2
-kf_sigma_pad_k   = 0.5
-kf_sigma_pad_max = 8.0
-kf_pad_decay     = 1.5
-# Velocity decay after a few unobserved frames (stops runaway coasting).
-kf_vel_decay     = 0.85
-# Geometric motorcycle-anchor updates: measured plate-in-box spread is 12–17 px
-# vs meas_pos=3, so the anchor is ~5× noisier than a real detection. The filter
-# treats it as a weak measurement (nudges, never yanks) and drops the old hard
-# 0.45×box-height size floor that made zones ~2× wider than the plate.
-kf_anchor_meas_scale = 5.0
-
-# ── Anti-flicker + plate shape ─────────────────────────────────────────────────
-# EMA alpha for plate box smoothing (0.0 = no smoothing, 1.0 = no smoothing).
-# Lower = smoother but laggier; 0.6 smooths jitter while still tracking curves.
-# Only used when zone_filter = "ema".
-ema_alpha = 0.6
-
-# Moto plates are near-square: clamp detected plate boxes on motorcycles to
-# this aspect-ratio range (w/h), centred on the detection. Prevents the blur
-# from stretching like a car plate or drifting off the plate holder.
-moto_ar_min = 0.9
-moto_ar_max = 1.3
-
-# ── Anchor-only blur for motorcycles ───────────────────────────────────────────
-# Skip plate detection on motos entirely and blur a fixed near-square zone on
-# the rear of the vehicle box (centre-bottom). Guaranteed coverage at any
-# distance, zero flicker, zero drift — the zone is where the plate must be.
-# Set false to fall back to plate-detection mode for motos.
-moto_anchor       = true
-# Weak/no-plate path: oval ~40% of moto box height, centred mid-rear
-# (covers plate + tyre band without swallowing the rider's seat).
-moto_anchor_frac  = 0.40   # zone side as fraction of the vehicle box height
-# Vertical centre of the zone (0..1 of box height). 0.55 ≈ mid-lower rear.
-moto_anchor_y     = 0.55
-moto_anchor_pad   = 0.08   # extra padding around the zone (fraction of side)
-
-# Anti-flicker persistence: when the detector drops a motorcycle and its track
-# dies, keep blurring the last anchor zone for this many extra frames,
-# extrapolated with the recorded box velocity. Prevents the blur from blinking
-# out on the main (close-up) moto during brief light/inclination drops.
-moto_ghost_frames = 12
-
-# ── Close-range motorcycle handling ───────────────────────────────────────────
-# A detected moto box taller than `moto_close_frac` of the frame height is
-# treated as "close-up" (fills the frame, often cut at the edges, plate often
-# leaning): it is trusted at the reduced `moto_close_conf` (the model runs at
-# this floor, so a close moto re-acquires instantly instead of waiting for a
-# full-confidence detection), its anchor zone is widened by `moto_close_zone_w`
-# to cover the horizontal offset of the leaning plate, extended to any frame
-# edge the box touches (`moto_edge_px` tolerance), and the velocity
-# extrapolation is frozen (pixel velocity is unreliable at close range and
-# would drag the blur off the plate).
-moto_close_frac     = 0.40
-moto_close_conf     = 0.20
-moto_close_zone_w   = 1.0
-moto_edge_px        = 4
-
-# Near motorcycle handling: a box taller than `moto_near_frac` of the frame
-# height is "near" — the YOLO box of a near moto includes the rider's head,
-# so the plate sits BELOW the box centre. The anchor zone therefore slides
-# down (from moto_anchor_y toward moto_anchor_y_max as the box grows) and is
-# never smaller than `moto_zone_min_side` px (fragmented close-up boxes would
-# otherwise shrink it below the plate size). Re-born tracks also seed their
-# zone from the ghost, so the blur never jumps when the detector re-acquires
-# the same moto.
-moto_near_frac      = 0.15
-moto_zone_min_side  = 30.0
-moto_anchor_y_max   = 0.72
-
-# Skip blur when the moto box is shorter than this fraction of frame height
-# (plate already unreadable). 115/1080 ≈ 0.1065 at 1080p.
+# Skip motorcycle observations whose vehicle box is smaller than this fraction
+# of the frame height (plate already unreadable). ~115 px at 1080p.
+# Compared to max(width, height) so a leaned bike is not treated as distant.
 moto_min_blur_box_h_frac = 0.1065
-# Cap zone area vs vehicle box when a trusted plate pose exists (19s ovals).
-moto_max_zone_box_frac = 0.35
-# Weak/miss path: bottom of the oval may reach this fraction of box height.
-# Was 0.92 (full rear + seat); 0.75 ≈ mid → tyre without eating the rider.
-moto_weak_fender_frac = 0.75
 
-# Plate-confirmed zone upgrade: when the plate model reliably finds the plate
-# inside a motorcycle (conf >= moto_plate_conf for moto_plate_promote_frames
-# consecutive frames), the geometric anchor zone is replaced by the
-# EMA-smoothed plate detection — precise at distance (small distant plates),
-# zero drift, no anchor estimation error. A single weak/absent detection never
-# yanks the blur; the promotion decays only after the window passes without a
-# valid plate, falling back to the guaranteed geometric zone.
-# 0.15 calibrated: aligned with the audit floor — every in-box detection the
-# audit can read must blur (as a safety-net patch). The Kalman filter itself
-# only adopts detections that also pass a geometry gate (plate centre in the
-# mid-rear of the vehicle box, plausible size): a 0.17-conf wheel/backpack hit
-# must never yank the smoothed zone off a locked-on plate (24s/28s failure).
-moto_plate_conf           = 0.15
-moto_plate_promote_frames = 2
-# While promoted, the plate position is HELD and extrapolated with its
-# recorded velocity for up to `moto_plate_hold_frames` frames without a new
-# detection (angled motos show detection bursts: ~1/3 of frames). Only after
-# the hold expires does the zone snap back to the geometric anchor. This is
-# what keeps the blur glued to the real plate across detection gaps.
-moto_plate_hold_frames   = 15
+# Schmitt trigger around that size. Stay large until size drops below
+# exit_frac * threshold; become large only at or above enter_frac * threshold.
+# Stops green/magenta flicker when YOLO alternates rider+bike vs rear-only.
+moto_size_enter_frac = 1.15
+moto_size_exit_frac = 0.85
 
-# Layer 3: refine the blur onto the plate's rotated quad. Disabled by default —
-# on close motorcycles minAreaRect often locks onto the brighter taillight /
-# reflector inside the zone and shrinks the blur onto it, leaving the real
-# plate readable just below (24s/28s). Re-enable only for distant car plates
-# where the zone is tight around a real detection.
-moto_quad_refine = false
+# Geometric moto zone: wide oval. Height = vehicle-box h ×
+# moto_base_height_frac (h/3). Width = height × aspect. Vertical centre is
+# always h/2 up from the *bottom* of the green box (wheels) — the top of
+# the YOLO box and Sobel energy both flicker. Angle from crop-energy PCA.
+# Size / x / angle are EMA-smoothed per moto.
+moto_base_blur = true
+moto_base_if_no_plate = false
+moto_base_width_frac = 0.42
+moto_base_height_frac = 0.333333
+moto_base_aspect = 1.82
+moto_base_min_width = 36
+moto_base_min_height = 22
+moto_base_lean_strip_frac = 0.30
+moto_base_lean_snap_frac = 0.04
+moto_base_lean_max_shift_frac = 0.28
+moto_base_lean_snap_angle = 8.0
+moto_base_rear_along_frac = 0.20
+moto_base_smooth_alpha = 0.22
+moto_base_smooth_alpha_pos = 0.35
+moto_base_smooth_alpha_ang = 0.28
 
 
 # ── Frame preprocessing ───────────────────────────────────────────────────────
 [preprocessing]
 
-# Unsharp masking — sharpens the detection frame before SAHI tiling.
-# Helps recover plates in blurry, soft-focus, or heavily compressed footage
-# by amplifying edge contrast before the plate model sees the image.
-# Has no effect on the output blur; it only affects what the detector sees.
+# Unsharp masking on the vehicle crop (not the full frame).
 # NOTE: measured on the 38s leaned-moto case — sharpen on the FRAME
-# (amount 0.5–2.0, sigma 1.0) DESTROYS small in-box plate detections
-# (11→1 hits over 31 frames; 1→0 on frame 1132). Keep OFF.
+# DESTROYS small in-box plate detections. Keep OFF on the frame; CLAHE
+# below is the crop-only contrast path.
 sharpen        = false
 
 # How strongly to amplify the sharpening:
@@ -283,19 +118,24 @@ sharpen_amount = 2.0
 # 1.0 sharpens fine detail; increase to 2.0 to target coarser blur.
 sharpen_sigma  = 1.0
 
-# Per-vehicle crop upscaling — runs a second plate-detection pass on each
-# detected vehicle's bounding box, extracted from the original full-resolution
-# frame and upscaled by this factor with Lanczos resampling.
-# A plate that is 30 px wide at the original scale becomes 60–90 px wide,
-# dramatically improving confidence on distant or small vehicles that the
-# main SAHI pass misses.
-# 1.0 = disabled  |  2.0 = recommended  |  3.0 = aggressive (slower)
+# CLAHE on each vehicle crop (LAB lightness). Helps plates in tree shadow /
+# low contrast without changing geometry. clip 2.0 is mild; 3–4 is stronger.
+crop_clahe = true
+crop_clahe_clip = 2.0
+crop_clahe_grid = 8
+
+# Vehicle crop canvas — square the plate model sees (letterbox, same aspect).
+# 640 = old default. 1280 = larger tela so a ~600 px bike is not squeezed.
+# Upscale onto this canvas is capped at vehicle_crop_scale / moto_crop_scale.
+plate_crop_imgsz = 1280
+
+# Max upscale of the vehicle box onto plate_crop_imgsz (aspect preserved).
+# 2.0 = at most double; extra canvas is padding, not more zoom.
 vehicle_crop_scale = 2.0
 
-# Motorcycle crop pass — rear-box ROI only (preserves plate pixels better than
-# letterboxing the full tall bike box). Upscale is independent of cars/trucks.
+# Motorcycle extra pass — rear-box ROI at the same max upscale.
 moto_crop_bottom_frac = 0.28   # ROI from this fraction of box height to bottom
-moto_crop_scale = 3.0
+moto_crop_scale = 2.0
 moto_crop_side_pad_frac = 0.05
 
 
@@ -337,28 +177,3 @@ quality = 18
 # "auto" picks the OS temp dir at runtime (e.g. /tmp on Linux/macOS,
 # %TEMP% on Windows). Set an explicit path to use a specific drive/location.
 tmp_dir = "auto"
-
-
-# ── Offline past+future gap fills ─────────────────────────────────────────────
-# Enabled with CLI --offline-zones (requires an existing --detect-cache).
-# Hybrid mode: the online tracker still owns blur quality; offline only
-# proposes short bridges on frames where the tracker emitted nothing, and
-# only when displacement looks like the same motorcycle.
-[offline]
-
-# Max consecutive missed frames to fill between two detections (~0.5 s @ 30 fps).
-max_gap_frames = 15
-
-# Motion gate: allowed travel ≈ max(max_disp_px, vehicle_diag * max_disp_frac)
-# × gap_frames (plus a small margin inside the code).
-max_disp_px = 80.0
-max_disp_frac = 0.35
-
-# Endpoints must share a vehicle box at least this IoU (same bike).
-min_vehicle_iou = 0.15
-
-# Ignore cached plates below this confidence when building tracklets.
-conf_floor = 0.15
-
-# If true, only plates associated with motorcycles are bridged.
-moto_only = true

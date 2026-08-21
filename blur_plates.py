@@ -2,8 +2,8 @@
 """
 License Plate Blurring Tool
 ===========================
-Detects license plates using YOLOv8 vehicle detection + a fine-tuned plate
-model run with SAHI sliced inference, then blurs them. Output is visually
+Detects license plates using YOLOv8 vehicle detection plus a plate model
+on each vehicle crop, then blurs them. Output is visually
 lossless (FFV1 intermediate → HEVC CRF/CQ 18) with the original audio
 preserved.
 
@@ -86,7 +86,6 @@ from plates.ffmpeg import (
     _source_color_args,
 )
 from plates.common import covered_fraction
-from plates.kalman import BoxFilter
 from plates.models import load_models, _infer_batched, _pad_to_batch, _prefer_engine
 from plates.overlay import (
     draw_debug_overlay,
@@ -115,19 +114,17 @@ from plates.redact import (
     _quad_state_update,
 )
 from plates.report import _hardware_label, _print_run_summary
-from plates.track import PlateHistory, SceneTracker, VehicleTrack, _VehicleDetections
+from plates.track import build_zones, zone_stats
 
 
 def main():
     cfg = load_config()
     det  = cfg["detection"]
-    sahi = cfg["sahi"]
     blr  = cfg["blur"]
     out  = cfg["output"]
-    trk  = cfg.get("tracking", {})
+    trk  = cfg.get("zones", {})
     pre  = cfg.get("preprocessing", {})
     red  = cfg.get("redact", {})
-    off  = cfg.get("offline", {})
 
     parser = argparse.ArgumentParser(
         description="Blur license plates in video with zero quality loss.",
@@ -177,23 +174,17 @@ Examples:
                         choices=["all", "motorbike", "car", "bus", "truck"],
                         help="Only blur plates on the specified vehicle type (default: all)")
     parser.add_argument("--debug", action="store_true",
-                        help="Write detection overlay video instead of blurring "
-                             "(blue=vehicles, green=plate regions, orange=own plate)")
+                        help="Write detection overlay video instead of a clean blur "
+                             "(green=vehicles, magenta=moto below size threshold, "
+                             "blue=plate-model boxes, yellow=interpolated)")
     parser.add_argument("--debug-overlay", dest="debug_overlay",
                         action="store_true",
                         help="DEBUG DATA mode (A): rich in-frame overlay with source "
-                             "tags (SAHI/crop+/pred), trajectory trails and ghost "
-                             "boxes for tracked vehicles whose detector missed.")
+                             "tags (crop/bridge) on interpolated plate zones.")
     parser.add_argument("--debug-hud", dest="debug_hud", action="store_true",
                         help="DEBUG DATA mode (B): add a brand-styled side panel "
-                             "with frame#, counts, track list and per-stage timings. "
+                             "with frame#, counts and per-stage timings. "
                              "Output video gets wider by ~320 px.")
-    parser.add_argument("--detect-scale", dest="detect_scale", type=float,
-                        default=float(det.get("detect_scale", 1.0)),
-                        help="Fraction of resolution used for detection (default: "
-                             f"{det.get('detect_scale', 1.0)}).  "
-                             "0.5 = ~5× faster on 4K, minimal accuracy loss at "
-                             "typical dashcam distances. Blur always at full res.")
     parser.add_argument("--mode", dest="mode",
                         default=red.get("mode", "blur"),
                         choices=["blur", "color", "image"],
@@ -210,27 +201,14 @@ Examples:
                         metavar="PATH",
                         help="Overlay image when --mode image. PNG with alpha is supported. "
                              "The image is stretched to fill each plate rectangle.")
-    parser.add_argument("--zone-filter", dest="zone_filter",
-                        default=None, choices=["ema", "kalman"],
-                        help="Temporal filter for the blur zone. Overrides "
-                             f"[tracking] zone_filter (config: "
-                             f"{trk.get('zone_filter', 'ema')}). 'kalman' removes "
-                             "the lag of the chained EMAs and the lag/overshoot "
-                             "alternation on frames where the plate is missed.")
     parser.add_argument("--detect-cache", dest="detect_cache",
                         default=None,
                         metavar="JSONL",
                         help="Cache the raw detector output per frame. The file is "
                              "written when it does not exist and replayed when it "
-                             "does, so tracking/blur experiments skip inference "
-                             "entirely. The cache is refused if the detection "
-                             "settings differ from the ones it was built with.")
-    parser.add_argument("--offline-zones", dest="offline_zones",
-                        action="store_true",
-                        help="Hybrid anti-blink: keep the online tracker for "
-                             "blur quality, and fill frames where it emits "
-                             "nothing using past+future bridges from an "
-                             "existing --detect-cache (motion-gated).")
+                             "does, so blur experiments skip inference entirely. "
+                             "The cache is refused if the detection settings differ "
+                             "from the ones it was built with.")
     parser.add_argument("--fixlist", dest="fixlist",
                         default=None,
                         metavar="JSON",
@@ -246,14 +224,6 @@ Examples:
 
     if start_sec is not None and end_sec is not None and end_sec <= start_sec:
         print("Error: --end must be after --start")
-        sys.exit(1)
-
-    if args.offline_zones and not args.detect_cache:
-        print("Error: --offline-zones requires --detect-cache PATH")
-        sys.exit(1)
-    if args.offline_zones and args.detect_cache and not os.path.exists(args.detect_cache):
-        print("Error: --offline-zones needs an existing cache file "
-              f"(not found: {args.detect_cache})")
         sys.exit(1)
 
     own_plate = parse_region(args.own_plate) if args.own_plate else None
@@ -287,8 +257,8 @@ Examples:
         vehicle_conf=args.conf,
         plate_conf=args.plate_conf,
         plate_conf_in_vehicle=args.plate_conf_in_vehicle,
-        sahi_slice_size=sahi["slice_size"],
-        sahi_overlap=sahi["overlap"],
+        sahi_slice_size=640,   # unused; kept in cache header for old jsonl
+        sahi_overlap=0.2,
         own_plate_region=own_plate,
         vehicle_filter=args.vehicles,
         preset=out["preset"],
@@ -297,73 +267,47 @@ Examples:
         debug=args.debug,
         debug_overlay=args.debug_overlay,
         debug_hud=args.debug_hud,
-        tracking_enabled=bool(trk.get("enabled", True)),
-        max_gap_frames=int(trk.get("max_gap_frames", 8)),
-        history_frames=int(trk.get("history_frames", 15)),
-        min_vehicle_conf=float(trk.get("min_vehicle_conf", 0.60)),
-        predict_expand_max=int(trk.get("predict_expand_max", 20)),
-        standalone_min_ar=float(det.get("standalone_min_ar", 1.2)),
-        standalone_max_ar=float(det.get("standalone_max_ar", 6.0)),
-        detect_scale=args.detect_scale,
+        detect_scale=0.5,  # unused; kept in cache header for old jsonl
         sharpen=bool(pre.get("sharpen", False)),
         sharpen_amount=float(pre.get("sharpen_amount", 1.5)),
         sharpen_sigma=float(pre.get("sharpen_sigma", 1.0)),
-        vehicle_crop_scale=float(pre.get("vehicle_crop_scale", 1.0)),
-        moto_crop_scale=float(pre.get("moto_crop_scale", 3.0)),
+        vehicle_crop_scale=float(pre.get("vehicle_crop_scale", 2.0)),
+        moto_crop_scale=float(pre.get("moto_crop_scale", 2.0)),
         moto_crop_bottom_frac=float(pre.get("moto_crop_bottom_frac", 0.28)),
         moto_crop_side_pad_frac=float(pre.get("moto_crop_side_pad_frac", 0.05)),
+        plate_crop_imgsz=int(pre.get("plate_crop_imgsz", 1280)),
+        crop_clahe=bool(pre.get("crop_clahe", False)),
+        crop_clahe_clip=float(pre.get("crop_clahe_clip", 2.0)),
+        crop_clahe_grid=int(pre.get("crop_clahe_grid", 8)),
+        moto_close_conf=float(det.get("moto_close_conf", 0.20)),
         redact_mode=args.mode,
         redact_color=redact_color,
         redact_image_path=args.image if args.mode == "image" else None,
         max_box_frac=float(blr.get("max_box_frac", 0.15)),
-        predict_max_disp=float(trk.get("predict_max_disp", 40.0)),
-        fallback_enabled=bool(trk.get("fallback_enabled", True)),
-        fallback_frac=float(trk.get("fallback_frac", 0.40)),
-        fallback_pad_frac=float(trk.get("fallback_pad_frac", 0.25)),
-        fallback_min_frames=int(trk.get("fallback_min_frames", 3)),
-        ema_alpha=float(trk.get("ema_alpha", 0.6)),
-        moto_ar_min=float(trk.get("moto_ar_min", 0.9)),
-        moto_ar_max=float(trk.get("moto_ar_max", 1.3)),
-        moto_anchor=bool(trk.get("moto_anchor", True)),
-        moto_anchor_frac=float(trk.get("moto_anchor_frac", 0.45)),
-        moto_anchor_y=float(trk.get("moto_anchor_y", 0.70)),
-        moto_anchor_pad=float(trk.get("moto_anchor_pad", 0.15)),
-        moto_ghost_frames=int(trk.get("moto_ghost_frames", 6)),
-        moto_close_frac=float(trk.get("moto_close_frac", 0.40)),
-        moto_close_conf=float(trk.get("moto_close_conf", 0.20)),
-        moto_close_zone_w=float(trk.get("moto_close_zone_w", 1.6)),
-        moto_edge_px=int(trk.get("moto_edge_px", 4)),
-        moto_near_frac=float(trk.get("moto_near_frac", 0.15)),
-        moto_zone_min_side=float(trk.get("moto_zone_min_side", 40.0)),
-        moto_anchor_y_max=float(trk.get("moto_anchor_y_max", 0.72)),
-        moto_plate_conf=float(trk.get("moto_plate_conf", 0.30)),
-        moto_plate_promote_frames=int(trk.get("moto_plate_promote_frames", 2)),
-        moto_plate_hold_frames=int(trk.get("moto_plate_hold_frames", 15)),
-        moto_plate_pad=int(blr.get("padding", 10)),
-        moto_min_blur_box_h_frac=float(trk.get("moto_min_blur_box_h_frac", 0.10)),
-        moto_max_zone_box_frac=float(trk.get("moto_max_zone_box_frac", 0.35)),
-        moto_weak_fender_frac=float(trk.get("moto_weak_fender_frac", 0.92)),
-        moto_quad_refine=bool(trk.get("moto_quad_refine", True)),
         blur_shape=str(blr.get("blur_shape", "rect")),
         forced_fixlist=forced_fix,
-        emit_max_disp=float(trk.get("emit_max_disp", 80.0)),
         detect_cache=args.detect_cache,
-        zone_filter=args.zone_filter or str(trk.get("zone_filter", "ema")),
-        kf_params={k: float(trk[k]) for k in (
-            "kf_process_pos", "kf_process_size", "kf_meas_pos", "kf_meas_size",
-            "kf_gate_max", "kf_max_rejects", "kf_sigma_pad_k",
-            "kf_sigma_pad_max", "kf_pad_decay", "kf_vel_decay",
-            "kf_anchor_meas_scale",
-        ) if k in trk},
-        offline_zones=bool(args.offline_zones),
-        offline_params={
-            "max_gap_frames": int(off.get("max_gap_frames", 15)),
-            "max_disp_px": float(off.get("max_disp_px", 80.0)),
-            "max_disp_frac": float(off.get("max_disp_frac", 0.35)),
-            "conf_floor": float(off.get("conf_floor", 0.15)),
-            "moto_only": bool(off.get("moto_only", True)),
-            "min_vehicle_iou": float(off.get("min_vehicle_iou", 0.15)),
-            "min_blur_box_h_frac": float(trk.get("moto_min_blur_box_h_frac", 0.10)),
+        zone_params={
+            "max_gap_frames": int(trk.get("max_gap_frames", 15)),
+            "max_disp_px": float(trk.get("max_disp_px", 80.0)),
+            "max_disp_frac": float(trk.get("max_disp_frac", 0.35)),
+            "min_vehicle_iou": float(trk.get("min_vehicle_iou", 0.15)),
+            "conf_floor": float(trk.get("conf_floor", det.get("plate_conf_in_vehicle", 0.15))),
+            "min_moto_h_frac": float(trk.get("moto_min_blur_box_h_frac", 0.1065)),
+            "moto_size_enter_frac": float(trk.get("moto_size_enter_frac", 1.15)),
+            "moto_size_exit_frac": float(trk.get("moto_size_exit_frac", 0.85)),
+            "moto_base_blur": bool(trk.get("moto_base_blur", True)),
+            "moto_base_if_no_plate": bool(trk.get("moto_base_if_no_plate", False)),
+            "moto_base_width_frac": float(trk.get("moto_base_width_frac", 0.42)),
+            "moto_base_height_frac": float(trk.get("moto_base_height_frac", 1.0 / 3.0)),
+            "moto_base_aspect": float(trk.get("moto_base_aspect", 1.82)),
+            "moto_base_min_width": float(trk.get("moto_base_min_width", 36.0)),
+            "moto_base_min_height": float(trk.get("moto_base_min_height", 22.0)),
+            "moto_base_lean_strip_frac": float(trk.get("moto_base_lean_strip_frac", 0.30)),
+            "moto_base_lean_snap_frac": float(trk.get("moto_base_lean_snap_frac", 0.04)),
+            "moto_base_lean_max_shift_frac": float(trk.get("moto_base_lean_max_shift_frac", 0.28)),
+            "moto_base_smooth_alpha": float(trk.get("moto_base_smooth_alpha", 0.22)),
+            "moto_base_smooth_alpha_pos": float(trk.get("moto_base_smooth_alpha_pos", 0.35)),
         },
     )
 

@@ -1,57 +1,190 @@
-import cv2, subprocess, sys, os
-sys.path.insert(0, '.')
-from blur_plates import load_models, apply_blur
+#!/usr/bin/env python3
+"""Unit tests for plates.detect (no video file, no model load).
 
-subprocess.run([
-    'ffmpeg', '-y', '-ss', '89', '-i', '../final.mov',
-    '-frames:v', '1', '-f', 'image2', 'test_frame.png'
-], capture_output=True)
+Run:  python test_detect.py
+"""
+import os
+import sys
 
-frame = cv2.imread('test_frame.png')
-h, w = frame.shape[:2]
-print(f'Frame: {w}x{h}')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-yolo, cascades, device = load_models()
-gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+import numpy as np
 
-# YOLO vehicle detection on full frame
-results = yolo(frame, conf=0.3, verbose=False)
-vehicle_boxes = []
-VEHICLE_CLASSES = {2, 3, 5, 7}
-for r in results:
-    if r.boxes is None: continue
-    for box in r.boxes:
-        if int(box.cls[0]) in VEHICLE_CLASSES:
-            x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
-            vehicle_boxes.append((x1,y1,x2,y2))
-            print(f'  Vehicle detected: ({x1},{y1})-({x2},{y2})')
+from plates.detect import (
+    _box_contains_centre,
+    dedupe_vehicles,
+    enhance_crop_contrast,
+    filter_moto_plate_geometry,
+    letterbox_to_square,
+    moto_rear_roi,
+    plate_in_moto_geometry_ok,
+    unletterbox_xyxy,
+)
 
-print(f'Total vehicles: {len(vehicle_boxes)}')
 
-# Cascade on full-res frame
-plate_rects = []
-for casc in cascades:
-    dets = casc.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=4, minSize=(60,20), maxSize=(500,150))
-    for (px,py,pw,ph) in (dets if len(dets) else []):
-        print(f'  Cascade hit: ({px},{py}) {pw}x{ph}')
-        plate_rects.append((px, py, px+pw, py+ph))
+def test_letterbox_preserves_aspect_and_roundtrips_box():
+    img = np.zeros((200, 100, 3), dtype=np.uint8)
+    canvas, scale, pad_x, pad_y = letterbox_to_square(img, size=640)
+    assert canvas.shape[:2] == (640, 640)
+    x1, y1, x2, y2 = unletterbox_xyxy(
+        pad_x, pad_y, pad_x + 100 * scale, pad_y + 200 * scale,
+        scale, pad_x, pad_y, 100, 200,
+    )
+    assert (x1, y1, x2, y2) == (0, 0, 100, 200)
 
-# Also search inside vehicle boxes
-for (vx1,vy1,vx2,vy2) in vehicle_boxes:
-    mid_y = vy1 + int((vy2-vy1)*0.4)
-    roi = gray[max(0,mid_y):min(h,vy2+20), max(0,vx1-10):min(w,vx2+10)]
-    for casc in cascades:
-        dets = casc.detectMultiScale(roi, scaleFactor=1.05, minNeighbors=3, minSize=(60,20), maxSize=(500,150))
-        for (px,py,pw,ph) in (dets if len(dets) else []):
-            print(f'  Plate in vehicle: ({vx1+px},{mid_y+py}) {pw}x{ph}')
-            plate_rects.append((vx1+px, mid_y+py, vx1+px+pw, mid_y+py+ph))
 
-print(f'Total plate regions: {len(plate_rects)}')
+def test_letterbox_empty_image_returns_canvas():
+    img = np.zeros((0, 10, 3), dtype=np.uint8)
+    canvas, scale, pad_x, pad_y = letterbox_to_square(img, size=64)
+    assert canvas.shape[:2] == (64, 64)
+    assert scale == 1.0
 
-if plate_rects:
-    out = apply_blur(frame.copy(), plate_rects)
-    cv2.imwrite('test_frame_blurred.png', out)
-    print('Saved test_frame_blurred.png')
-else:
-    print('NO PLATES DETECTED — check test_frame.png manually')
 
+def test_enhance_crop_contrast_keeps_shape():
+    img = np.full((40, 60, 3), 80, dtype=np.uint8)
+    img[10:30, 15:45] = 40
+    out = enhance_crop_contrast(img, clip=2.0, grid=4)
+    assert out.shape == img.shape
+    assert out.dtype == img.dtype
+    assert int(out.std()) >= int(img.std())
+
+
+def test_letterbox_caps_upscale_at_max_scale():
+    img = np.zeros((100, 50, 3), dtype=np.uint8)
+    canvas, scale, pad_x, pad_y = letterbox_to_square(
+        img, size=640, max_scale=2.0)
+    assert canvas.shape[:2] == (640, 640)
+    assert abs(scale - 2.0) < 1e-6
+    # 50x100 * 2 = 100x200, centred on 640
+    x1, y1, x2, y2 = unletterbox_xyxy(
+        pad_x, pad_y, pad_x + 50 * scale, pad_y + 100 * scale,
+        scale, pad_x, pad_y, 50, 100,
+    )
+    assert (x1, y1, x2, y2) == (0, 0, 50, 100)
+
+
+def test_letterbox_downscales_large_crop_to_fit():
+    img = np.zeros((2000, 400, 3), dtype=np.uint8)
+    canvas, scale, _, _ = letterbox_to_square(
+        img, size=1280, max_scale=2.0)
+    assert canvas.shape[:2] == (1280, 1280)
+    assert abs(scale - 1280 / 2000) < 1e-6
+
+
+def test_moto_rear_roi_starts_at_bottom_frac():
+    rx1, ry1, rx2, ry2 = moto_rear_roi(100, 200, 180, 400, bottom_frac=0.28,
+                                       side_pad_frac=0.05)
+    assert ry1 == 200 + int(200 * 0.28)
+    assert ry2 == 400
+    assert rx1 < 100 and rx2 > 180
+
+
+def test_moto_rear_roi_clamps_to_frame():
+    rx1, ry1, rx2, ry2 = moto_rear_roi(
+        0, 0, 50, 100, bottom_frac=0.5, side_pad_frac=0.2,
+        frame_w=80, frame_h=100,
+    )
+    assert rx1 >= 0 and ry1 >= 0
+    assert rx2 <= 80 and ry2 <= 100
+
+
+def test_plate_in_moto_geometry_accepts_anywhere_inside_box():
+    box = (100, 100, 200, 300)
+    mid = (140, 200, 170, 230)
+    top = (140, 105, 170, 125)
+    bottom = (140, 270, 170, 295)
+    outside = (140, 310, 170, 330)
+    assert plate_in_moto_geometry_ok(mid, box)
+    assert plate_in_moto_geometry_ok(top, box)
+    assert plate_in_moto_geometry_ok(bottom, box)
+    assert not plate_in_moto_geometry_ok(outside, box)
+
+
+def test_box_contains_centre_with_expand():
+    box = (100, 100, 200, 200)
+    inside = (140, 140, 160, 160)
+    just_outside = (210, 140, 230, 160)
+    assert _box_contains_centre(inside, box, 0.15)
+    assert not _box_contains_centre(just_outside, box, 0.15)
+    near_edge = (198, 140, 220, 160)  # centre ~209, expand 15 px → inside
+    assert _box_contains_centre(near_edge, box, 0.15)
+
+
+def test_filter_keeps_in_box_moto_plates_anywhere():
+    box = (100, 100, 200, 300)
+    vehicles = [(3, *box, 0.8)]
+    mid = (140, 200, 170, 230, 0.5, "crop_moto")
+    top = (140, 105, 170, 125, 0.5, "crop_moto")
+    bottom = (140, 270, 170, 295, 0.5, "crop_moto")
+    kept, rej = filter_moto_plate_geometry([mid, top, bottom], vehicles,
+                                           collect_rejected=True)
+    assert len(kept) == 3
+    assert rej == []
+
+
+def test_filter_rejects_crop_far_from_every_vehicle():
+    vehicles = [(3, 100, 100, 200, 220, 0.8)]
+    far = (500, 500, 520, 520, 0.40, "crop_moto")
+    kept, rej = filter_moto_plate_geometry([far], vehicles, collect_rejected=True)
+    assert kept == []
+    assert len(rej) == 1 and rej[0][5] == "rejected"
+
+
+def test_filter_keeps_standalone_sahi_outside_moto():
+    vehicles = [(3, 100, 100, 200, 220, 0.8)]
+    sahi = (500, 500, 560, 520, 0.50, "sahi")
+    kept, rej = filter_moto_plate_geometry([sahi], vehicles, collect_rejected=True)
+    assert kept == [sahi]
+    assert rej == []
+
+
+def test_filter_keeps_plate_that_also_overlaps_a_car():
+    moto = (3, 100, 100, 200, 300, 0.8)
+    car = (2, 150, 80, 400, 280, 0.9)
+    plate = (160, 110, 190, 140, 0.6, "crop")  # top of moto, but overlaps car
+    kept, rej = filter_moto_plate_geometry([plate], [moto, car],
+                                           collect_rejected=True)
+    assert kept == [plate]
+    assert rej == []
+
+
+def test_dedupe_merges_two_boxes_on_same_moto():
+    full = (3, 100, 200, 180, 420, 0.66)
+    rider = (3, 110, 210, 170, 340, 0.24)
+    out = dedupe_vehicles([full, rider])
+    assert len(out) == 1
+    cls, x1, y1, x2, y2, conf = out[0]
+    assert cls == 3
+    assert conf == 0.66
+    assert (x1, y1, x2, y2) == (100, 200, 180, 420)
+
+
+def test_dedupe_keeps_two_separate_motos():
+    left = (3, 100, 200, 180, 400, 0.7)
+    right = (3, 400, 200, 480, 400, 0.6)
+    out = dedupe_vehicles([left, right])
+    assert len(out) == 2
+
+
+def test_dedupe_does_not_merge_car_and_moto():
+    moto = (3, 100, 200, 180, 400, 0.7)
+    car = (2, 110, 210, 170, 380, 0.8)
+    out = dedupe_vehicles([moto, car])
+    assert len(out) == 2
+
+
+if __name__ == "__main__":
+    import traceback
+    failed = 0
+    names = [n for n in sorted(globals())
+             if n.startswith("test_") and callable(globals()[n])]
+    for name in names:
+        try:
+            globals()[name]()
+            print(f"PASS  {name}")
+        except Exception:
+            failed += 1
+            print(f"FAIL  {name}")
+            traceback.print_exc()
+    print(f"\n{len(names) - failed} passed, {failed} failed")
+    sys.exit(1 if failed else 0)

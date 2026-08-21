@@ -6,7 +6,7 @@ built caches — tracking / blur settings do not affect these numbers.
 
     python eval_detection.py cache/ref_200_230.jsonl --json cache/det_baseline_ref.json
 
-Note: changing detect_scale, SAHI, crop upscale, or moto ROI invalidates a cache
+Note: changing crop upscale or moto ROI invalidates a cache
 (see plates/detcache.py _META_KEYS). Write a new path such as
 cache/ref_200_230_det_v2.jsonl instead of overwriting the baseline.
 """
@@ -26,10 +26,8 @@ _MOTO_CLS = 3
 _KEY_SECONDS = (9.0, 18.0, 24.0, 28.0)
 
 
-def plate_geometry_ok(plate, box, ry_lo=0.25, ry_hi=0.78,
-                      min_rw=0.08, min_rh=0.05) -> bool:
-    return _plate_geometry_ok(plate, box, ry_lo=ry_lo, ry_hi=ry_hi,
-                              min_rw=min_rw, min_rh=min_rh)
+def plate_geometry_ok(plate, box, **kwargs) -> bool:
+    return _plate_geometry_ok(plate, box, **kwargs)
 
 
 def _tightest_moto(plate, vehicles):
@@ -129,7 +127,7 @@ def evaluate(cache_path: str, fps: float = 29.97, conf_floor: float = 0.15,
     report = {
         "cache": cache_path,
         "meta": {k: meta.get(k) for k in (
-            "detect_scale", "vehicle_crop_scale", "sahi_slice_size",
+            "vehicle_crop_scale", "plate_crop_imgsz",
             "plate_conf_in_vehicle", "moto_crop_scale", "moto_crop_bottom_frac",
             "moto_crop_side_pad_frac",
         )},
@@ -155,7 +153,7 @@ def evaluate(cache_path: str, fps: float = 29.97, conf_floor: float = 0.15,
         },
         "miss_examples": miss_examples[:16],
         "note": (
-            "Changing detect_scale / SAHI / crop / moto ROI invalidates a cache "
+            "Changing crop / moto ROI invalidates a cache "
             "(_META_KEYS in plates/detcache.py). Write a new path instead of "
             "overwriting the baseline."
         ),

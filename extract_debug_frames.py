@@ -7,8 +7,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from blur_plates import load_models, DETECT_WIDTH, VEHICLE_CLASSES, time_to_seconds
 import argparse
 
-VEHICLE_COLOR = (255, 80, 0)    # blue
-PLATE_COLOR   = (0, 220, 0)     # green
+VEHICLE_COLOR = (0, 220, 0)     # green
+PLATE_COLOR   = (255, 80, 0)    # blue
 FONT          = cv2.FONT_HERSHEY_SIMPLEX
 
 def draw_box(img, x1, y1, x2, y2, color, label, thickness=4):

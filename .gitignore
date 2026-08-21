@@ -1,8 +1,8 @@
-# Ship the two small Ultralytics .pt checkpoints in git (~45 MB total).
+# Ship the two Ultralytics .pt checkpoints in git (~61 MB total).
 # Ignore any other local weight formats / extra experiments.
 *.pt
 !license-plate-finetune-v1m.pt
-!yolov8n.pt
+!yolov8s.pt
 *.onnx
 *.engine
 

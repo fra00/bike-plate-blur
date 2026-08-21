@@ -28,7 +28,7 @@ def _print_run_summary(*, elapsed_total, elapsed_process, device, info,
                        redact_mode, redact_color, redact_image_path,
                        vehicle_filter, total_quads=0):
     """Print a compact one-page summary at the end of a video run."""
-    bar = "═" * 60
+    bar = "=" * 60
 
     in_name  = os.path.basename(input_path)
     out_name = os.path.basename(output_path)
@@ -57,7 +57,7 @@ def _print_run_summary(*, elapsed_total, elapsed_process, device, info,
     print(f"  Input          :  {in_name}")
     print(f"                    {res} @ {in_fps:.2f} fps  |  {in_codec}  |  {_format_duration(in_dur)}")
     print(f"  Output         :  {out_name}")
-    print(f"                    {out_size:.1f} MB  |  HEVC (lossless intermediate → visually lossless mux)")
+    print(f"                    {out_size:.1f} MB  |  HEVC (lossless intermediate -> visually lossless mux)")
     print(f"  Redaction      :  {mode_desc}")
     if vehicle_filter and vehicle_filter != "all":
         print(f"  Vehicle filter :  {vehicle_filter} only")

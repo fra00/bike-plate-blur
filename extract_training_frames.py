@@ -225,7 +225,6 @@ def _process_video(video_path, outdir, vehicle_model, plate_model, device,
             vehicle_conf=0.30,
             plate_conf=CONF_UNCERTAIN_LOW,
             plate_conf_in_vehicle=CONF_UNCERTAIN_LOW,
-            sahi_slice_size=640, sahi_overlap=0.2,
             sharpen=True, sharpen_amount=1.5, sharpen_sigma=1.0,
             vehicle_crop_scale=2.0,
         )

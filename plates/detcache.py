@@ -33,7 +33,9 @@ _META_KEYS = (
     "sahi_slice_size", "sahi_overlap", "detect_scale",
     "sharpen", "sharpen_amount", "sharpen_sigma", "vehicle_crop_scale",
     "moto_crop_scale", "moto_crop_bottom_frac", "moto_crop_side_pad_frac",
-    "moto_close_conf", "plate_model",
+    "plate_crop_imgsz",
+    "crop_clahe", "crop_clahe_clip", "crop_clahe_grid",
+    "moto_close_conf", "plate_model", "vehicle_model",
 )
 
 
@@ -119,6 +121,11 @@ class DetectionCache:
     # ── writing ───────────────────────────────────────────────────────────────
 
     def put(self, frame_idx: int, plates: list, vehicles: list) -> None:
+        stored = (
+            [tuple(p) for p in plates],
+            [tuple(v) for v in vehicles],
+        )
+        self._data[frame_idx] = stored
         if self._fh is None:
             return
         self._fh.write(json.dumps({
@@ -135,9 +142,46 @@ class DetectionCache:
         if self._written % _FLUSH_EVERY == 0:
             self._fh.flush()
 
+    def finish_write(self) -> None:
+        """Close a write-mode cache so the in-memory frames can be interpolated."""
+        self.close()
+        self.reading = True
+        self.partial = False
+        self.frames = len(self._data)
+
     def close(self) -> None:
         if self._fh is not None:
             self._fh.write(json.dumps({"eof": self._written}) + "\n")
             self._fh.close()
             self._fh = None
-            self.frames = self._written
+            self.frames = self._written if self._written else len(self._data)
+
+
+class DetectionStore:
+    """In-memory (plates, vehicles) store with the DetectionCache read API."""
+
+    def __init__(self):
+        self._data = {}
+        self.reading = False
+        self.partial = False
+        self.frames = 0
+
+    def put(self, frame_idx: int, plates: list, vehicles: list) -> None:
+        self._data[frame_idx] = (
+            [tuple(p) for p in plates],
+            [tuple(v) for v in vehicles],
+        )
+
+    def get(self, frame_idx: int):
+        return self._data.get(frame_idx)
+
+    def frame_indices(self) -> list:
+        return sorted(self._data)
+
+    def finish_write(self) -> None:
+        self.reading = True
+        self.frames = len(self._data)
+
+    def close(self) -> None:
+        self.finish_write()
+

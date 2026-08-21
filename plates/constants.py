@@ -17,6 +17,7 @@ VEHICLE_FILTER_MAP = {
 }
 
 PLATE_MODEL_PATH = os.path.join(_PROJECT_ROOT, "license-plate-finetune-v1m.pt")
+VEHICLE_MODEL_PATH = os.path.join(_PROJECT_ROOT, "yolov8s.pt")
 DETECT_WIDTH = 1280  # both models run at this width; coords scaled back to full-res
 
 # TensorRT engine batch size (exported with batch=4). The engine accepts
@@ -30,10 +31,12 @@ _CUVID_DECODERS = {
     "vp9":  "vp9_cuvid",
 }
 
-_DBG_VEHICLE_COLOR = (255, 100,   0)   # blue
+_DBG_VEHICLE_COLOR = (  0, 220,   0)   # green — vehicle YOLO (usable size)
+_DBG_VEHICLE_SMALL_COLOR = (180,   0, 255)  # magenta — moto below min blur height
 _DBG_GHOST_COLOR      = (180,  80,  80)   # dim teal — tracked vehicle, detector missed
 _DBG_SUPPRESSED_COLOR = (120, 120, 120)   # grey    — duplicate plate, suppressed
-_DBG_PLATE_COLOR      = (  0, 220,   0)   # green  — raw model detection
+_DBG_PLATE_COLOR      = (255,  80,   0)   # blue  — raw plate-model detection
+_DBG_BASE_COLOR       = (255, 180,   0)   # cyan  — geometric moto zone (box base)
 _DBG_PREDICT_COLOR = (  0, 220, 220)   # yellow — tracker-predicted (gap fill)
 _DBG_BLUR_COLOR    = (  0,   0, 220)   # red    — padded blur region
 _DBG_OWN_COLOR     = (  0, 140, 255)   # orange — own plate fixed region
@@ -47,7 +50,7 @@ _DD_WHITE     = (240, 240, 240)
 _DD_DIM       = (140, 140, 150)
 _DD_RED       = (26,  0,   226)    # Signal Red
 _DD_BLUE      = (255, 102, 0)      # Data Blue
-_DD_GREEN     = (0,   230, 0)      # detection box
+_DD_GREEN     = (0,   230, 0)      # vehicle box
 _DD_YELLOW    = (0,   220, 220)    # predicted (gap-fill)
 _DD_ORANGE    = (0,   140, 255)    # own-plate
 _DD_TRAIL     = (255, 200, 80)     # cyan trajectory tail
@@ -55,14 +58,13 @@ _DD_GHOST     = (90,  90,  100)    # rejected / dropped
 
 # Source-to-colour map for plate boxes
 _DD_SOURCE_COLOR = {
-    "sahi": _DD_GREEN,
-    "crop": _DD_GREEN,
-    "pred": _DD_YELLOW,
-    "own":  _DD_ORANGE,
-    "fallback": (255, 0, 255),   # magenta — privacy fallback strip
-    "anchor": (255, 255, 0),     # cyan — anchor-only moto zone
-    "patch": (0, 200, 255),      # amber — guaranteed-coverage patch over a
-                                 # detection the smoothed zone does not cover
+    "sahi": _DD_BLUE,
+    "crop": _DD_BLUE,
+    "crop_moto": _DD_BLUE,
+    "bridge": _DD_YELLOW,
+    "own": _DD_ORANGE,
+    "base": (255, 180, 0),
+    "base_lean": (255, 180, 0),
 }
 
 _DD_FONT_DIR = os.path.join(os.path.expanduser("~"),

@@ -4,18 +4,60 @@ import os
 import cv2
 import numpy as np
 
-from plates.common import iou
 from plates.constants import (
     VEHICLE_CLASSES,
-    _DBG_BLUR_COLOR, _DBG_FONT, _DBG_GHOST_COLOR, _DBG_OWN_COLOR,
-    _DBG_PLATE_COLOR, _DBG_PREDICT_COLOR, _DBG_SUPPRESSED_COLOR,
-    _DBG_VEHICLE_COLOR,
+    _DBG_FONT, _DBG_OWN_COLOR,
+    _DBG_PLATE_COLOR, _DBG_PREDICT_COLOR, _DBG_BASE_COLOR,
+    _DBG_VEHICLE_COLOR, _DBG_VEHICLE_SMALL_COLOR,
     _DD_BLUE, _DD_DIM, _DD_F_BODY, _DD_F_DISP, _DD_F_MONO, _DD_F_MONOB,
-    _DD_FONT_DIR, _DD_GHOST, _DD_GREEN, _DD_HUD_BG, _DD_HUD_LINE, _DD_HUD_W,
-    _DD_ORANGE, _DD_RED, _DD_SOURCE_COLOR, _DD_TRAIL, _DD_VOID_BG,
-    _DD_WHITE, _DD_YELLOW,
+    _DD_FONT_DIR, _DD_GHOST, _DD_GREEN, _DD_HUD_BG, _DD_HUD_W,
+    _DD_RED, _DD_SOURCE_COLOR, _DD_VOID_BG,
+    _DD_WHITE,
 )
-from plates.redact import apply_redaction
+from plates.redact import (
+    apply_redaction,
+    apply_blur_rotated_ellipse,
+    ellipse_from_zone,
+)
+
+_MOTO_CLS = 3
+
+
+def _is_base_zone(rect) -> bool:
+    return len(rect) > 5 and str(rect[5]).startswith("base")
+
+
+def _dbg_ellipse(img, rect, color, label, thickness=2):
+    cx, cy, ax, ay, angle = ellipse_from_zone(rect)
+    cx, cy = int(round(cx)), int(round(cy))
+    iax, iay = max(1, int(round(ax))), max(1, int(round(ay)))
+    cv2.ellipse(img, (cx, cy), (iax, iay), float(angle), 0, 360, color, thickness)
+    fs = max(0.55, iay / 180)
+    (tw, th), _ = cv2.getTextSize(label, _DBG_FONT, fs, 2)
+    pad = 6
+    lx = min(max(0, cx - tw // 2), img.shape[1] - tw - pad * 2)
+    by1 = max(0, cy - iay - th - pad * 2)
+    cv2.rectangle(img, (lx, by1), (lx + tw + pad * 2, by1 + th + pad * 2), color, -1)
+    cv2.putText(img, label, (lx + pad, by1 + th + pad), _DBG_FONT, fs,
+                (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def _vehicle_box_style(cls, x1, y1, x2, y2, conf, frame_h, min_moto_h_frac,
+                       moto_large_boxes=None):
+    """Green if the vehicle can enter blur zones; magenta if moto is too small."""
+    name = VEHICLE_CLASSES.get(cls, str(cls))
+    label = f"{name} {conf:.2f}"
+    if cls != _MOTO_CLS or min_moto_h_frac <= 0:
+        return _DBG_VEHICLE_COLOR, label
+    box = (int(x1), int(y1), int(x2), int(y2))
+    if moto_large_boxes is not None:
+        is_large = box in moto_large_boxes
+    else:
+        size = max(x2 - x1, y2 - y1)
+        is_large = size >= min_moto_h_frac * float(frame_h)
+    if not is_large:
+        return _DBG_VEHICLE_SMALL_COLOR, f"{label} small"
+    return _DBG_VEHICLE_COLOR, label
 
 
 def _dbg_box(img, x1, y1, x2, y2, color, label, thickness=3):
@@ -35,19 +77,17 @@ def _dbg_box(img, x1, y1, x2, y2, color, label, thickness=3):
     cv2.putText(img, label, (lx + pad, ty), _DBG_FONT, fs, (255, 255, 255), 2, cv2.LINE_AA)
 
 def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
-                       blur_padding=8, blur_strength=61, tracker=None,
-                       suppressed_plates=None,
+                       blur_padding=8, blur_strength=61,
                        redact_mode="blur", redact_color=(0, 0, 0),
-                       overlay_img=None):
+                       overlay_img=None, observed_plates=None,
+                       min_moto_h_frac=0.1065, moto_large_boxes=None):
     """
-    Returns a debug frame that shows exactly what the production output will look like:
-      - Redaction (blur / solid colour / image overlay) is applied to all detected
-        regions, matching production output exactly
-      - Blue box     = vehicle detection  (label: class conf | #id Nf detected)
-      - Teal box     = tracked vehicle whose detector dropped this frame (label: gap N/M)
-      - Green box    = raw plate detection boundary
-      - Yellow box   = tracker-predicted plate (gap fill)
-      - Red box      = padded redaction region (what was actually erased)
+    Returns a debug frame that shows detections plus production redaction:
+      - Green box    = vehicle YOLO (moto large enough for blur zones)
+      - Magenta box  = motorcycle below the size gate (max side + hysteresis)
+      - Blue box     = plate model (the box it actually emitted)
+      - Cyan oval    = geometric moto zone (centre h/2 from box bottom, height h/3)
+      - Yellow box   = interpolated plate (gap fill, not a detection)
       - Orange box   = own-plate fixed region
     """
     h, w = frame.shape[:2]
@@ -57,79 +97,57 @@ def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
     all_rects = list(plate_rects)
     if own_plate_region:
         all_rects.append(own_plate_region)
-    if all_rects:
-        vis = apply_redaction(vis, all_rects, mode=redact_mode,
+    other = [r for r in all_rects if not _is_base_zone(r)]
+    base = [r for r in all_rects if _is_base_zone(r)]
+    if other:
+        vis = apply_redaction(vis, other, mode=redact_mode,
                               blur_strength=blur_strength,
                               color=redact_color,
                               overlay_img=overlay_img,
                               padding=blur_padding)
+    if base:
+        vis = apply_blur_rotated_ellipse(
+            vis, base, blur_strength=blur_strength, padding=blur_padding)
 
-    # ── Step 2: build a lookup of track data keyed by closest vehicle box ─────
-    # Maps each track to its detected vehicle (if any) so we can annotate labels.
-    track_by_vehicle = {}   # index into all_vehicles → VehicleTrack
-    ghost_tracks     = []   # tracks whose vehicle wasn't detected this frame
-    if tracker is not None:
-        for track in tracker.tracks:
-            if track.miss_count == 0:
-                # Find the all_vehicles entry closest to this track's box
-                best_vi, best_iou = None, 0.0
-                for vi, (_, vx1, vy1, vx2, vy2, _) in enumerate(all_vehicles):
-                    score = iou(track.box, (vx1, vy1, vx2, vy2))
-                    if score > best_iou:
-                        best_iou, best_vi = score, vi
-                if best_vi is not None and best_iou > 0.1:
-                    track_by_vehicle[best_vi] = track
-            else:
-                ghost_tracks.append(track)
-
-    # ── Step 3: detected vehicle boxes (blue) ────────────────────────────────
+    # ── Step 2: vehicle boxes (green = usable, magenta = moto too small) ──
     for vi, (cls, x1, y1, x2, y2, conf) in enumerate(all_vehicles):
-        track = track_by_vehicle.get(vi)
-        if track:
-            label = f"{VEHICLE_CLASSES[cls]} {conf:.2f} | #{track.id} {track.frames_seen}f"
-        else:
-            label = f"{VEHICLE_CLASSES[cls]} {conf:.2f}"
-        _dbg_box(vis, x1, y1, x2, y2, _DBG_VEHICLE_COLOR, label, thickness=3)
+        color, label = _vehicle_box_style(
+            cls, x1, y1, x2, y2, conf, h, min_moto_h_frac, moto_large_boxes)
+        _dbg_box(vis, x1, y1, x2, y2, color, label, thickness=3)
 
-    # ── Step 4: ghost vehicle boxes — tracked but not detected this frame ─────
-    for track in ghost_tracks:
-        x1, y1, x2, y2 = track.box
-        label = f"#{track.id} gap {track.miss_count}/{tracker.max_gap_frames} | {track.frames_seen}f"
-        _dbg_box(vis, x1, y1, x2, y2, _DBG_GHOST_COLOR, label, thickness=2)
-
-    # ── Step 3: plate boxes — green (detected), yellow (predicted), red (blur) ─
-    for rect in plate_rects:
+    # ── Step 3: real plate-model boxes (blue) ────────────────────────────────
+    raw = observed_plates if observed_plates is not None else [
+        r for r in plate_rects
+        if (r[5] if len(r) > 5 else "sahi") != "bridge"
+    ]
+    for rect in raw:
         x1, y1, x2, y2 = rect[:4]
         conf = rect[4] if len(rect) > 4 else None
+        source = rect[5] if len(rect) > 5 else "sahi"
+        if source in ("bridge", "own") or str(source).startswith("base"):
+            continue
+        label = f"plate {conf:.2f}" if conf is not None else "plate"
+        _dbg_box(vis, x1, y1, x2, y2, _DBG_PLATE_COLOR, label, thickness=2)
 
-        if conf is not None and conf < 0:      # tracker gap fill (SAHI missed this frame)
-            color = _DBG_PREDICT_COLOR
-            label = "gap fill"
-        else:
-            color = _DBG_PLATE_COLOR
-            label = f"plate {conf:.2f}" if conf is not None else "plate"
+    # Yellow: interpolated zones (not a model hit)
+    for rect in plate_rects:
+        source = rect[5] if len(rect) > 5 else "sahi"
+        if source != "bridge":
+            continue
+        x1, y1, x2, y2 = rect[:4]
+        _dbg_box(vis, x1, y1, x2, y2, _DBG_PREDICT_COLOR, "interpolated", thickness=2)
 
-        # Colour-coded boundary
-        _dbg_box(vis, x1, y1, x2, y2, color, label, thickness=2)
-
-        # Red: padded region that was blurred
-        px1 = max(0, x1 - blur_padding)
-        py1 = max(0, y1 - blur_padding)
-        px2 = min(w, x2 + blur_padding)
-        py2 = min(h, y2 + blur_padding)
-        cv2.rectangle(vis, (px1, py1), (px2, py2), _DBG_BLUR_COLOR, 4)
+    for rect in plate_rects:
+        source = rect[5] if len(rect) > 5 else ""
+        if not str(source).startswith("base"):
+            continue
+        label = "base lean" if source == "base_lean" else "base"
+        _dbg_ellipse(vis, rect, _DBG_BASE_COLOR, label, thickness=2)
 
     # ── Step 4: own-plate fixed region (orange) ───────────────────────────────
     if own_plate_region:
         ox1, oy1, ox2, oy2 = own_plate_region
         _dbg_box(vis, ox1, oy1, ox2, oy2, _DBG_OWN_COLOR, "own plate", thickness=3)
-
-    # ── Step 5: suppressed duplicates (grey, thin) ────────────────────────────
-    for rect in (suppressed_plates or []):
-        x1, y1, x2, y2 = rect[:4]
-        conf  = rect[4] if len(rect) > 4 else None
-        label = f"dup {conf:.2f}" if conf is not None else "dup"
-        _dbg_box(vis, x1, y1, x2, y2, _DBG_SUPPRESSED_COLOR, label, thickness=1)
 
     return vis
 
@@ -161,27 +179,32 @@ def _dd_dashed_rect(img, x1, y1, x2, y2, color, thickness=2, dash=8, gap=4):
     for iy in range(y1, y2, step):
         cv2.line(img, (x1, iy), (x1, min(iy+dash, y2)), color, thickness)
 
-def draw_extended_overlay(frame, plate_rects, all_vehicles, tracker=None,
+def draw_extended_overlay(frame, plate_rects, all_vehicles,
                           blur_padding=8, blur_strength=61,
                           redact_mode="blur", redact_color=(0, 0, 0),
-                          overlay_img=None, rejected_plates=None):
+                          overlay_img=None, rejected_plates=None,
+                          min_moto_h_frac=0.1065, moto_large_boxes=None):
     """
     DEBUG DATA - mode A.  Returns a frame with the actual redaction applied
-    plus rich annotations: source-tagged plate boxes, vehicle boxes with
-    track IDs, ghost tracks, plate trajectory trails, and a top HUD strip
-    summarising what's in this frame.
+    plus source-tagged plate boxes and vehicle boxes.
     """
     h, w = frame.shape[:2]
     vis = frame.copy()
 
     # ── Apply real redaction so the user sees production output ───────────
     if plate_rects:
-        vis = apply_redaction(vis, plate_rects,
-                              mode=redact_mode,
-                              blur_strength=blur_strength,
-                              color=redact_color,
-                              overlay_img=overlay_img,
-                              padding=blur_padding)
+        other = [r for r in plate_rects if not _is_base_zone(r)]
+        base = [r for r in plate_rects if _is_base_zone(r)]
+        if other:
+            vis = apply_redaction(vis, other,
+                                  mode=redact_mode,
+                                  blur_strength=blur_strength,
+                                  color=redact_color,
+                                  overlay_img=overlay_img,
+                                  padding=blur_padding)
+        if base:
+            vis = apply_blur_rotated_ellipse(
+                vis, base, blur_strength=blur_strength, padding=blur_padding)
 
     # ── Rejected detections (grey, dashed) — below confidence threshold ───
     # Drawn first so accepted/predicted boxes render on top of them.
@@ -192,74 +215,37 @@ def draw_extended_overlay(frame, plate_rects, all_vehicles, tracker=None,
         label = f"REJ {conf:.2f}" if conf is not None else "REJ"
         _dd_tag(vis, x1, y1, label, _DD_GHOST, fs=0.4)
 
-    # ── Vehicle boxes (blue) with track-aware rich tag ────────────────────
-    track_by_vidx = {}
-    ghost_tracks  = []
-    if tracker is not None:
-        for tr in tracker.tracks:
-            if tr.miss_count == 0:
-                # Find closest current vehicle box for labelling
-                best_vi, best_iou = None, 0.0
-                for vi, (_, vx1, vy1, vx2, vy2, _) in enumerate(all_vehicles):
-                    score = iou(tr.box, (vx1, vy1, vx2, vy2))
-                    if score > best_iou:
-                        best_iou, best_vi = score, vi
-                if best_vi is not None and best_iou > 0.1:
-                    track_by_vidx[best_vi] = tr
-            else:
-                ghost_tracks.append(tr)
-
+    # ── Vehicle boxes (green = usable, magenta = moto too small) ───────────
     for vi, (cls, x1, y1, x2, y2, conf) in enumerate(all_vehicles):
-        tr = track_by_vidx.get(vi)
-        if tr:
-            label = (f"{VEHICLE_CLASSES[cls]} {conf:.2f} | "
-                     f"#TRK{tr.id} age:{tr.frames_seen}f miss:{tr.miss_count}")
-        else:
-            label = f"{VEHICLE_CLASSES[cls]} {conf:.2f}"
-        cv2.rectangle(vis, (x1, y1), (x2, y2), _DD_BLUE, 2)
-        _dd_tag(vis, x1, y1, label, _DD_BLUE)
-
-    # ── Ghost tracks (detector missed this frame, tracker still holds) ────
-    for tr in ghost_tracks:
-        x1, y1, x2, y2 = tr.box
-        label = f"GHOST #{tr.id} gap {tr.miss_count}/{tracker.max_gap_frames}"
-        cv2.rectangle(vis, (x1, y1), (x2, y2), _DD_GHOST, 1)
-        _dd_tag(vis, x1, y1, label, _DD_GHOST, fs=0.45)
-
-    # ── Plate trajectory trails — fading cyan line per track ──────────────
-    if tracker is not None:
-        for tr in tracker.tracks:
-            if not tr.plate.has_history:
-                continue
-            # Use the centres of the recorded plate positions
-            pts = [(int(d[1]), int(d[2])) for d in tr.plate._data[-15:]]
-            for i in range(len(pts) - 1):
-                alpha = 0.25 + 0.75 * (i / max(1, len(pts) - 1))
-                c = tuple(int(v * alpha) for v in _DD_TRAIL)
-                cv2.line(vis, pts[i], pts[i+1], c, 2, cv2.LINE_AA)
+        color, label = _vehicle_box_style(
+            cls, x1, y1, x2, y2, conf, h, min_moto_h_frac, moto_large_boxes)
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        _dd_tag(vis, x1, y1, label, color)
 
     # ── Plate boxes with source tag ───────────────────────────────────────
-    src_counts = {"sahi": 0, "crop": 0, "pred": 0, "own": 0, "fallback": 0,
-                  "anchor": 0}
+    src_counts = {"sahi": 0, "crop": 0, "crop_moto": 0, "bridge": 0, "own": 0}
     for rect in plate_rects:
         x1, y1, x2, y2 = rect[:4]
         conf   = rect[4] if len(rect) > 4 else None
         source = rect[5] if len(rect) > 5 else "sahi"
-        src_counts[source] = src_counts.get(source, 0) + 1
+        count_key = "crop" if source.startswith("crop") else source
+        src_counts[count_key] = src_counts.get(count_key, 0) + 1
         color = _DD_SOURCE_COLOR.get(source, _DD_GREEN)
 
-        if source == "pred":
+        if source == "bridge":
             _dd_dashed_rect(vis, x1, y1, x2, y2, color, thickness=2)
-            _dd_tag(vis, x1, y2 + 20, "PRED  gap-fill", color,
+            _dd_tag(vis, x1, y2 + 20, "BRIDGE  interpolated", color,
                     fg_bgr=(0, 0, 0), fs=0.45)
-        elif source == "fallback":
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-            _dd_tag(vis, x1, y1, "FALLBACK  bottom strip", color,
-                    fg_bgr=(0, 0, 0), fs=0.45)
-        elif source == "anchor":
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-            _dd_tag(vis, x1, y1, "ANCHOR  moto zone", color,
-                    fg_bgr=(0, 0, 0), fs=0.45)
+        elif str(source).startswith("base"):
+            cx, cy, ax, ay, angle = ellipse_from_zone(rect)
+            cv2.ellipse(
+                vis,
+                (int(round(cx)), int(round(cy))),
+                (max(1, int(round(ax))), max(1, int(round(ay)))),
+                float(angle), 0, 360, color, 2,
+            )
+            tag = "BASE LEAN" if source == "base_lean" else "BASE"
+            _dd_tag(vis, x1, y1, tag, color, fg_bgr=(0, 0, 0))
         else:
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
             if conf is not None and conf >= 0:
@@ -274,8 +260,8 @@ def draw_extended_overlay(frame, plate_rects, all_vehicles, tracker=None,
     cv2.rectangle(vis, (0, strip_h - 1), (w, strip_h), _DD_BLUE, 1)
     strip_text = (f"DEBUG DATA   VEH {len(all_vehicles)}   "
                   f"PLT {len(plate_rects)} "
-                  f"(SAHI {src_counts['sahi']}, crop+ {src_counts['crop']}, "
-                  f"pred {src_counts['pred']}, own {src_counts['own']})   "
+                  f"(obs {src_counts['sahi'] + src_counts['crop'] + src_counts.get('crop_moto', 0)}, "
+                  f"bridge {src_counts['bridge']}, own {src_counts['own']})   "
                   f"REJ {len(rejected_plates or [])}")
     cv2.putText(vis, strip_text, (12, 26),
                 cv2.FONT_HERSHEY_DUPLEX, 0.55, _DD_WHITE, 1, cv2.LINE_AA)
@@ -382,20 +368,19 @@ def draw_hud_panel(frame_h, telemetry):
 
     # ── PLATES ────────────────────────────────────────────────────────────
     plates = telemetry.get("plates", [])
-    by_src = {"sahi": 0, "crop": 0, "pred": 0, "own": 0, "fallback": 0,
-              "anchor": 0}
+    by_src = {"sahi": 0, "crop": 0, "bridge": 0, "own": 0}
     for r in plates:
         s = r[5] if len(r) > 5 else "sahi"
+        if s.startswith("crop"):
+            s = "crop"
         by_src[s] = by_src.get(s, 0) + 1
     section("PLATES", BLUE_RGB)
-    kv("SAHI",  f"{by_src['sahi']}",
-       value_color=WHITE_RGB if by_src["sahi"] else DIM_RGB)
-    kv("crop+", f"{by_src['crop']}",
-       value_color=WHITE_RGB if by_src["crop"] else DIM_RGB)
-    kv("pred",  f"{by_src['pred']}",
-       value_color=WHITE_RGB if by_src["pred"] else DIM_RGB)
-    kv("own",   f"{by_src['own']}",
-       value_color=WHITE_RGB if by_src["own"] else DIM_RGB)
+    kv("obs", f"{by_src.get('sahi', 0) + by_src.get('crop', 0)}",
+       value_color=WHITE_RGB if (by_src.get('sahi', 0) + by_src.get('crop', 0)) else DIM_RGB)
+    kv("bridge", f"{by_src.get('bridge', 0)}",
+       value_color=WHITE_RGB if by_src.get("bridge") else DIM_RGB)
+    kv("own", f"{by_src.get('own', 0)}",
+       value_color=WHITE_RGB if by_src.get("own") else DIM_RGB)
     yp[0] += 8
 
     # ── TRACKS list (up to 6 rows) ────────────────────────────────────────
@@ -405,15 +390,10 @@ def draw_hud_panel(frame_h, telemetry):
                   font=fnt_mono, fill=DIM_RGB)
         yp[0] += 24
     else:
-        for tr in tracks[:6]:
-            draw.text((x0,        yp[0]), f"#{tr.id}",
+        for tid in tracks[:6]:
+            label = f"#{getattr(tid, 'id', tid)}"
+            draw.text((x0, yp[0]), label,
                       font=fnt_mono_b, fill=WHITE_RGB)
-            draw.text((x0 + 50,   yp[0]),
-                      f"age {tr.frames_seen}f",
-                      font=fnt_mono, fill=(180, 180, 200, 255))
-            draw.text((x0 + 165,  yp[0]),
-                      f"miss {tr.miss_count}",
-                      font=fnt_mono, fill=(180, 180, 200, 255))
             yp[0] += 22
         if len(tracks) > 6:
             draw.text((x0, yp[0]), f"+ {len(tracks) - 6} more...",

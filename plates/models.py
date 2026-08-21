@@ -3,7 +3,7 @@ import os
 
 from sahi import AutoDetectionModel
 
-from plates.constants import PLATE_MODEL_PATH, TRT_BATCH, _PROJECT_ROOT
+from plates.constants import PLATE_MODEL_PATH, TRT_BATCH, VEHICLE_MODEL_PATH
 
 
 # Set by load_models(): True when a fixed-batch TensorRT engine was loaded, so
@@ -111,7 +111,7 @@ def load_models(plate_conf: float = 0.07):
     plate_path = _prefer_engine(PLATE_MODEL_PATH, device)
     _TRT_ACTIVE = plate_path.endswith(".engine")
 
-    vehicle_model = YOLO(_prefer_engine(os.path.join(_PROJECT_ROOT, "yolov8n.pt"), device))
+    vehicle_model = YOLO(_prefer_engine(VEHICLE_MODEL_PATH, device))
     if str(getattr(vehicle_model, "ckpt_path", "")).endswith(".pt"):
         vehicle_model.to(device)
 
