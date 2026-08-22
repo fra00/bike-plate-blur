@@ -8,7 +8,7 @@ from plates.common import iou
 from plates.constants import (
     VEHICLE_CLASSES,
     _DBG_FONT, _DBG_OWN_COLOR,
-    _DBG_PLATE_COLOR, _DBG_PREDICT_COLOR, _DBG_BASE_COLOR,
+    _DBG_PLATE_COLOR, _DBG_PREDICT_COLOR,
     _DBG_SUPPRESSED_COLOR,
     _DBG_VEHICLE_COLOR, _DBG_VEHICLE_SMALL_COLOR,
     _DD_BLUE, _DD_DIM, _DD_F_BODY, _DD_F_DISP, _DD_F_MONO, _DD_F_MONOB,
@@ -18,40 +18,9 @@ from plates.constants import (
 )
 from plates.redact import (
     apply_redaction,
-    apply_blur_circle,
 )
 
 _MOTO_CLS = 3
-
-
-def _is_base_zone(rect) -> bool:
-    return len(rect) > 5 and str(rect[5]).startswith("base")
-
-
-def _zone_circle(rect):
-    x1, y1, x2, y2 = rect[:4]
-    cx = 0.5 * (float(x1) + float(x2))
-    cy = 0.5 * (float(y1) + float(y2))
-    if len(rect) >= 10:
-        r = max(float(rect[8]), float(rect[9]))
-    else:
-        r = 0.5 * min(float(x2) - float(x1), float(y2) - float(y1))
-    return cx, cy, r
-
-
-def _dbg_circle(img, rect, color, label, thickness=2):
-    cx, cy, r = _zone_circle(rect)
-    cx, cy = int(round(cx)), int(round(cy))
-    ir = max(1, int(round(r)))
-    cv2.circle(img, (cx, cy), ir, color, thickness)
-    fs = max(0.55, ir / 180)
-    (tw, th), _ = cv2.getTextSize(label, _DBG_FONT, fs, 2)
-    pad = 6
-    lx = min(max(0, cx - tw // 2), img.shape[1] - tw - pad * 2)
-    by1 = max(0, cy - ir - th - pad * 2)
-    cv2.rectangle(img, (lx, by1), (lx + tw + pad * 2, by1 + th + pad * 2), color, -1)
-    cv2.putText(img, label, (lx + pad, by1 + th + pad), _DBG_FONT, fs,
-                (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def _vehicle_box_style(cls, x1, y1, x2, y2, conf, frame_h, min_moto_h_frac,
@@ -99,7 +68,6 @@ def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
       - Magenta box  = motorcycle below the size gate (max side + hysteresis)
       - Blue box     = plate-model hit that became a blur zone
       - Grey box     = plate-model hit that tracking dropped (skip)
-      - Cyan circle  = geometric moto zone (centre h/2 from box bottom, height h/3)
       - Yellow box   = interpolated plate (gap fill, not a detection)
       - Orange box   = own-plate fixed region
     """
@@ -110,17 +78,12 @@ def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
     all_rects = list(plate_rects)
     if own_plate_region:
         all_rects.append(own_plate_region)
-    other = [r for r in all_rects if not _is_base_zone(r)]
-    base = [r for r in all_rects if _is_base_zone(r)]
-    if other:
-        vis = apply_redaction(vis, other, mode=redact_mode,
+    if all_rects:
+        vis = apply_redaction(vis, all_rects, mode=redact_mode,
                               blur_strength=blur_strength,
                               color=redact_color,
                               overlay_img=overlay_img,
                               padding=blur_padding)
-    if base:
-        vis = apply_blur_circle(
-            vis, base, blur_strength=blur_strength, padding=blur_padding)
 
     # ── Step 2: vehicle boxes (green = usable, magenta = moto too small) ──
     for vi, (cls, x1, y1, x2, y2, conf) in enumerate(all_vehicles):
@@ -138,13 +101,12 @@ def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
     used = [
         r for r in plate_rects
         if (r[5] if len(r) > 5 else "") not in ("bridge", "own")
-        and not str(r[5] if len(r) > 5 else "").startswith("base")
     ]
     for rect in raw:
         x1, y1, x2, y2 = (int(rect[i]) for i in range(4))
         conf = rect[4] if len(rect) > 4 else None
         source = rect[5] if len(rect) > 5 else "sahi"
-        if source in ("bridge", "own") or str(source).startswith("base"):
+        if source in ("bridge", "own"):
             continue
         kept = any(iou((x1, y1, x2, y2), z[:4]) >= 0.3 for z in used)
         if kept:
@@ -162,12 +124,6 @@ def draw_debug_overlay(frame, plate_rects, all_vehicles, own_plate_region=None,
             continue
         x1, y1, x2, y2 = rect[:4]
         _dbg_box(vis, x1, y1, x2, y2, _DBG_PREDICT_COLOR, "interpolated", thickness=2)
-
-    for rect in plate_rects:
-        source = rect[5] if len(rect) > 5 else ""
-        if not str(source).startswith("base"):
-            continue
-        _dbg_circle(vis, rect, _DBG_BASE_COLOR, "base", thickness=2)
 
     # ── Step 4: own-plate fixed region (orange) ───────────────────────────────
     if own_plate_region:
@@ -218,18 +174,12 @@ def draw_extended_overlay(frame, plate_rects, all_vehicles,
 
     # ── Apply real redaction so the user sees production output ───────────
     if plate_rects:
-        other = [r for r in plate_rects if not _is_base_zone(r)]
-        base = [r for r in plate_rects if _is_base_zone(r)]
-        if other:
-            vis = apply_redaction(vis, other,
-                                  mode=redact_mode,
-                                  blur_strength=blur_strength,
-                                  color=redact_color,
-                                  overlay_img=overlay_img,
-                                  padding=blur_padding)
-        if base:
-            vis = apply_blur_circle(
-                vis, base, blur_strength=blur_strength, padding=blur_padding)
+        vis = apply_redaction(vis, plate_rects,
+                              mode=redact_mode,
+                              blur_strength=blur_strength,
+                              color=redact_color,
+                              overlay_img=overlay_img,
+                              padding=blur_padding)
 
     # ── Rejected detections (grey, dashed) — below confidence threshold ───
     # Drawn first so accepted/predicted boxes render on top of them.
@@ -261,15 +211,6 @@ def draw_extended_overlay(frame, plate_rects, all_vehicles,
             _dd_dashed_rect(vis, x1, y1, x2, y2, color, thickness=2)
             _dd_tag(vis, x1, y2 + 20, "BRIDGE  interpolated", color,
                     fg_bgr=(0, 0, 0), fs=0.45)
-        elif str(source).startswith("base"):
-            cx, cy, r = _zone_circle(rect)
-            cv2.circle(
-                vis,
-                (int(round(cx)), int(round(cy))),
-                max(1, int(round(r))),
-                color, 2,
-            )
-            _dd_tag(vis, x1, y1, "BASE", color, fg_bgr=(0, 0, 0))
         else:
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
             if conf is not None and conf >= 0:

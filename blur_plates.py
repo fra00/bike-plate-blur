@@ -300,12 +300,6 @@ Examples:
             "moto_size_enter_frac": float(trk.get("moto_size_enter_frac", 1.15)),
             "moto_size_exit_frac": float(trk.get("moto_size_exit_frac", 0.85)),
             "moto_min_conf": float(det.get("moto_min_conf", 0.30)),
-            "moto_base_blur": bool(trk.get("moto_base_blur", True)),
-            "moto_base_if_no_plate": bool(trk.get("moto_base_if_no_plate", True)),
-            "moto_base_height_frac": float(trk.get("moto_base_height_frac", 1.0 / 3.0)),
-            "moto_base_min_height": float(trk.get("moto_base_min_height", 22.0)),
-            "moto_base_smooth_alpha": float(trk.get("moto_base_smooth_alpha", 0.22)),
-            "moto_base_smooth_alpha_pos": float(trk.get("moto_base_smooth_alpha_pos", 0.35)),
         },
     )
 

@@ -349,7 +349,12 @@ def _fork_split_holds(cache, out, *, max_gap_frames: int, min_iou: float,
                             break
                     if sibling_box is None:
                         continue
-                    start = _remainder_box(ab, sibling_box) or ab
+                    start = _remainder_box(ab, sibling_box)
+                    # No leftover strip → sibling is the same bike, not a split.
+                    # Interpolating the full wide box toward a later moto C
+                    # paints ghosts on empty road before C exists.
+                    if start is None:
+                        continue
                     if _area(start) < 16 * 16:
                         continue
                     if not motion_gate_ok(

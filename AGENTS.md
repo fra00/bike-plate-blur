@@ -1,10 +1,11 @@
 # Agent instructions for https://github.com/fra00/bike-plate-blur
 
 ## What this repo is
-CLI tool that detects and blurs license plates in video (`blur_plates.py`),
-with motorcycle-oriented detection (letterbox crops, rear ROI). Plates are
-kept only inside vehicle boxes; blur zones are interpolated from the full
-detection cache. Config: `config.toml`.
+CLI that detects and blurs license plates in video (`blur_plates.py`).
+Motorcycle-oriented: letterbox vehicle crops, extra rear ROI on motos.
+Plates are kept only inside vehicle boxes; blur zones are interpolated from
+the full detection cache. No full-frame plate scan, no SAHI, no geometric
+moto-circle fallback. Config: `config.toml`. Architecture: `docs/pipeline.md`.
 
 ## Setup checklist (do not skip)
 1. Python 3.11/3.12 + ffmpeg/ffprobe on PATH
@@ -24,6 +25,7 @@ python blur_plates.py input.mp4 output.mp4 --start 2:00 --end 2:30 --detect-cach
 - `PLATE_DEVICE=cpu` or `cuda` to force device
 
 ## Do not commit
-Videos, `cache/`, `venv/`, `dataset/`, `*.onnx`, `*.engine`, and extra local
-`*.pt` experiments — see `.gitignore`. The two shipped checkpoints
-(`license-plate-finetune-v1m.pt`, `yolov8s.pt`) **are** tracked.
+Videos, `cache/`, `venv/`, `dataset/`, `runs/`, `training_data*`, `*.onnx`,
+`*.engine`, and extra local `*.pt` experiments — see `.gitignore`. The two
+shipped checkpoints (`license-plate-finetune-v1m.pt`, `yolov8s.pt`) **are**
+tracked.

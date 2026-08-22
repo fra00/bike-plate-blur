@@ -21,8 +21,8 @@ plate_conf_in_vehicle = 0.15
 moto_close_conf = 0.20
 
 # After YOLO: drop motorcycle boxes below this. Stops bus corners / debris
-# labelled motorcycle at 0.20–0.29 from getting a base circle. Cars/bus/truck
-# still use moto_close_conf as the detector floor. Replay-safe (not in cache).
+# labelled motorcycle at 0.20–0.29. Cars/bus/truck still use
+# moto_close_conf as the detector floor. Replay-safe (not in cache).
 moto_min_conf = 0.30
 
 # Detection scale / SAHI full-frame tiling were removed: the plate model
@@ -52,8 +52,7 @@ max_box_frac = 0.25
 [zones]
 
 # Max consecutive missed frames to interpolate between two observations
-# (~1.0 s at 30 fps). Longer gaps stay empty. Also holds vehicle boxes
-# (green overlay) across the same short YOLO misses.
+# (~1.0 s at 30 fps). Longer gaps stay empty.
 max_gap_frames = 30
 
 # Motion gate: allowed travel ≈ max(max_disp_px, vehicle_diag * max_disp_frac)
@@ -75,7 +74,7 @@ min_plate_side_px = 12.0
 # keep the larger one. No history: keep the larger box. A later hit whose
 # area is smaller than the vehicle's peak plate/vehicle ratio (not just the
 # last frame) by more than this factor is a blob: skip it so interpolation
-# or the moto circle covers the real plate. A receding bike is kept because
+# covers the real plate. A receding bike is kept because
 # plate and vehicle shrink together. Growth is kept.
 max_area_ratio = 2.5
 
@@ -94,15 +93,6 @@ moto_min_blur_box_h_frac = 0.08333
 # Stops green/magenta flicker when YOLO alternates rider+bike vs rear-only.
 moto_size_enter_frac = 1.15
 moto_size_exit_frac = 0.85
-
-# Geometric moto fallback when the plate model has no hit in the box:
-# circle of diameter h/3, centre h/2 up from the box bottom.
-moto_base_blur = true
-moto_base_if_no_plate = true
-moto_base_height_frac = 0.333333
-moto_base_min_height = 22
-moto_base_smooth_alpha = 0.22
-moto_base_smooth_alpha_pos = 0.35
 
 
 # ── Frame preprocessing ───────────────────────────────────────────────────────
