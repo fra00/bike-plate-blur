@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from plates.track import (
     MotoSizeGate,
+    _collect_dets,
     build_zones,
     hold_vehicles,
     motion_gate_ok,
@@ -129,14 +130,200 @@ def test_car_plate_is_kept():
     assert zones[5][0][:4] == (180, 360, 280, 400)
 
 
-def test_compact_plate_wins_over_fender_blob():
+def _truck(x1, y1, x2, y2, conf=0.9):
+    return (7, x1, y1, x2, y2, conf)
+
+
+def test_tiny_plate_side_is_dropped():
     veh = _moto(80, 200, 220, 520)
-    blob = _plate(90, 300, 200, 500, 0.45)      # tall blob, rh ≈ 0.62
-    plate = _plate(120, 380, 165, 430, 0.40)    # compact rear plate
-    cache = _FakeCache({10: ([blob, plate], [veh])})
+    cache = _FakeCache({
+        5: ([_plate(120, 380, 130, 390, 0.9)], [veh]),  # 10x10
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert zones == {}
+
+
+def test_readable_plate_above_floor_is_kept():
+    veh = _moto(80, 200, 220, 520)
+    cache = _FakeCache({
+        5: ([_plate(120, 380, 146, 410, 0.5)], [veh]),  # 26x30
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert 5 in zones
+    assert zones[5][0][:4] == (120, 380, 146, 410)
+
+
+def test_larger_plate_wins_over_blob():
+    veh = _moto(80, 200, 220, 520)
+    blob = _plate(120, 400, 143, 417, 0.50)   # 23x17
+    real = _plate(118, 378, 152, 420, 0.20)   # 34x42
+    cache = _FakeCache({10: ([blob, real], [veh])})
     zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
     assert len(zones[10]) == 1
-    assert zones[10][0][:4] == plate[:4]
+    assert zones[10][0][:4] == real[:4]
+
+
+def test_nearest_plate_beats_larger_top_case():
+    """Same moto: last plate is the real one; a bigger top-case blob appears."""
+    veh = _moto(1656, 660, 1878, 924)
+    real = _plate(1692, 792, 1745, 839, 0.70)
+    blob = _plate(1748, 712, 1825, 784, 0.22)  # larger, farther (bauletto)
+    cache = _FakeCache({
+        10: ([real], [veh]),
+        11: ([blob, real], [veh]),
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert zones[11][0][:4] == real[:4]
+
+
+def test_size_jump_recovers_to_larger_plate():
+    veh = _moto(80, 200, 220, 520)
+    cache = _FakeCache({
+        10: ([_plate(125, 392, 145, 408, 0.5)], [veh]),  # 20x16 slipped in
+        11: ([_plate(120, 378, 154, 420, 0.4)], [veh]),  # 34x42 real
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert 10 in zones and 11 in zones
+    assert zones[11][0][:4] == (120, 378, 154, 420)
+
+
+def test_size_jump_blob_is_bridged():
+    veh = _moto(80, 200, 220, 520)
+    cache = _FakeCache({
+        10: ([_plate(120, 380, 160, 420, 0.5)], [veh]),       # 40x40
+        11: ([_plate(125, 392, 145, 408, 0.6)], [veh]),       # 20x16 blob
+        12: ([_plate(122, 382, 162, 422, 0.5)], [veh]),       # 40x40
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert 10 in zones and 12 in zones and 11 in zones
+    assert zones[11][0][5] == "bridge"
+    assert zones[10][0][:4] == (120, 380, 160, 420)
+    assert zones[12][0][:4] == (122, 382, 162, 422)
+
+
+def test_low_conf_shrink_is_bridged_not_kept():
+    """5:31-style: a few tiny low-conf boxes between two full plates.
+
+    Skipping a blob must not forget the last full plate, or later blobs
+    become observations and a nearby small-plate track can swallow them.
+    """
+    veh = _moto(1300, 700, 1700, 1080)
+    full_a = _plate(1340, 893, 1428, 992, 0.70)   # 88x99
+    blob = _plate(1509, 988, 1546, 1022, 0.17)    # 37x34
+    full_b = _plate(1588, 903, 1682, 1005, 0.55)  # 94x102
+    cache = _FakeCache({
+        10: ([full_a], [veh]),
+        11: ([blob], [veh]),
+        12: ([blob], [veh]),
+        13: ([blob], [veh]),
+        14: ([blob], [veh]),
+        20: ([full_b], [veh]),
+    })
+    collected = _collect_dets(
+        cache, conf_floor=0.15, filter_classes={2, 3, 5, 7},
+        min_moto_h_frac=0.0, frame_height=1080, plate_mem_frames=30,
+        max_area_ratio=2.5,
+    )
+    assert [d.box for d in collected[10]] == [full_a[:4]]
+    assert [d.box for d in collected[20]] == [full_b[:4]]
+    for f in range(11, 20):
+        assert collected.get(f, []) == [], f"blob kept as observation on {f}"
+    zones = build_zones(
+        cache, max_gap_frames=30, max_disp_px=80.0, max_disp_frac=0.35,
+        conf_floor=0.15, min_moto_h_frac=0.0, frame_height=1080,
+        max_area_ratio=2.5,
+    )
+    assert zones[10][0][:4] == full_a[:4]
+    assert zones[20][0][:4] == full_b[:4]
+    for f in range(11, 20):
+        assert f in zones, f"expected bridged frame {f}"
+        assert zones[f][0][5] == "bridge"
+        w = zones[f][0][2] - zones[f][0][0]
+        h = zones[f][0][3] - zones[f][0][1]
+        assert w * h > 4000, f"interpolated box still tiny on frame {f}: {w}x{h}"
+
+
+def test_nested_inner_blob_loses_to_larger_plate():
+    """5:33-style: two overlapping hits on the same plate; keep the larger."""
+    veh = _moto(1540, 607, 1768, 865)
+    full = _plate(1648, 725, 1699, 773, 0.34)   # 51x48
+    inner = _plate(1638, 700, 1672, 726, 0.49)  # 34x26 nested
+    cache = _FakeCache({
+        10: ([full], [veh]),
+        11: ([full, inner], [veh]),
+    })
+    zones = build_zones(cache, conf_floor=0.15, min_moto_h_frac=0.0)
+    assert zones[11][0][:4] == full[:4]
+
+
+def test_gradual_shrink_is_dropped_against_peak():
+    """A plate that shrinks a little each frame must still trip max_area_ratio."""
+    veh = _moto(1500, 700, 1780, 1020)
+    cache = _FakeCache({
+        10: ([_plate(1600, 820, 1680, 900, 0.70)], [veh]),  # 80x80
+        11: ([_plate(1602, 822, 1672, 892, 0.60)], [veh]),  # 70x70
+        12: ([_plate(1604, 824, 1659, 879, 0.50)], [veh]),  # 55x55
+        13: ([_plate(1608, 830, 1648, 870, 0.40)], [veh]),  # 40x40 blob
+        14: ([_plate(1610, 832, 1640, 862, 0.30)], [veh]),  # 30x30 blob
+        20: ([_plate(1620, 818, 1698, 896, 0.65)], [veh]),  # 78x78 recovered
+    })
+    collected = _collect_dets(
+        cache, conf_floor=0.15, filter_classes={2, 3, 5, 7},
+        min_moto_h_frac=0.0, frame_height=1080, plate_mem_frames=30,
+        max_area_ratio=2.5,
+    )
+    assert (collected[10][0].box[2] - collected[10][0].box[0]) == 80
+    assert (collected[11][0].box[2] - collected[11][0].box[0]) == 70
+    for f in (13, 14):
+        assert collected.get(f, []) == [], f"ratcheted blob kept on {f}"
+    zones = build_zones(
+        cache, max_gap_frames=30, max_disp_px=80.0, max_disp_frac=0.35,
+        conf_floor=0.15, min_moto_h_frac=0.0, frame_height=1080,
+        max_area_ratio=2.5,
+    )
+    assert zones[20][0][5] != "skip"
+    w = zones[13][0][2] - zones[13][0][0]
+    h = zones[13][0][3] - zones[13][0][1]
+    assert w * h > 3000
+    assert zones[13][0][5] == "bridge"
+
+
+def test_hold_vehicles_class_flip_without_overlap():
+    cache = _FakeCache({
+        10: ([], [_moto(100, 400, 230, 560, 0.6)]),
+        11: ([], [_truck(120, 390, 240, 530, 0.4)]),
+        12: ([], []),
+        13: ([], [_truck(150, 400, 280, 550, 0.4)]),
+        14: ([], []),
+        15: ([], []),
+        16: ([], [_moto(280, 430, 430, 620, 0.5)]),
+    })
+    held = hold_vehicles(cache, max_gap_frames=30, max_class_flip_frames=10)
+    for f in range(11, 16):
+        motos = [v for v in held[f] if v[0] == 3]
+        assert len(motos) >= 1, f"expected held moto on frame {f}"
+
+
+def test_bridge_class_flip_gap_without_vehicle_overlap():
+    cache = _FakeCache({
+        10: ([_plate(140, 480, 175, 515, 0.5)],
+             [_moto(100, 400, 230, 560, 0.6)]),
+        11: ([], [_truck(120, 390, 240, 530, 0.4)]),
+        12: ([], []),
+        13: ([], []),
+        14: ([], []),
+        15: ([], []),
+        16: ([_plate(320, 510, 360, 555, 0.5)],
+             [_moto(280, 430, 430, 620, 0.5)]),
+    })
+    zones = build_zones(
+        cache, max_gap_frames=30, max_disp_px=80.0, max_disp_frac=0.35,
+        conf_floor=0.15, min_moto_h_frac=0.0, frame_height=1080,
+    )
+    assert 10 in zones and 16 in zones
+    for f in range(11, 16):
+        assert f in zones, f"expected bridged frame {f}"
+        assert any(z[5] == "bridge" for z in zones[f])
 
 
 def test_tiny_moto_is_skipped():
@@ -224,6 +411,54 @@ def test_hold_vehicles_skips_teleport():
     held = hold_vehicles(cache, max_gap_frames=15, max_disp_px=40.0,
                          max_disp_frac=0.05)
     assert [v for v in held[11] if v[0] == 3] == []
+
+
+def test_hold_vehicles_drops_low_conf_moto_via_cache_wrap():
+    from plates.detect import MotoConfCache
+    cache = _FakeCache({
+        10: ([], [_moto(1400, 760, 1550, 930, 0.23)]),
+        11: ([], [_moto(1402, 762, 1552, 932, 0.22)]),
+    })
+    wrapped = MotoConfCache(cache, 0.30)
+    held = hold_vehicles(wrapped, max_gap_frames=15)
+    assert [v for v in held[10] if v[0] == 3] == []
+    assert [v for v in held[11] if v[0] == 3] == []
+
+
+def test_hold_does_not_relabel_low_conf_truck_as_moto():
+    """A bus/truck at 0.22 next to a real moto must not become motorcycle 0.22."""
+    cache = _FakeCache({
+        10: ([], [_moto(1588, 826, 1695, 931, 0.44),
+                  _truck(1396, 765, 1542, 832, 0.22)]),
+        11: ([], [_moto(1587, 829, 1690, 930, 0.46),
+                  _truck(1389, 762, 1534, 829, 0.22)]),
+    })
+    held = hold_vehicles(cache, max_gap_frames=15, moto_min_conf=0.30)
+    for f in (10, 11):
+        motos = [v for v in held[f] if v[0] == 3]
+        assert all(v[5] >= 0.30 for v in motos), motos
+        assert any(v[1] > 1500 for v in motos)
+        assert not any(v[1] < 1450 and v[5] < 0.30 for v in motos)
+
+
+def test_hold_vehicles_forks_merged_moto_split():
+    """YOLO one wide box for two bikes, then only the left, then both."""
+    wide = _moto(100, 400, 400, 700, 0.6)
+    left = _moto(100, 400, 250, 700, 0.6)
+    right = _moto(270, 420, 400, 680, 0.5)
+    cache = _FakeCache({
+        10: ([], [wide]),
+        11: ([], [left]),
+        12: ([], [left]),
+        13: ([], [left, right]),
+    })
+    held = hold_vehicles(cache, max_gap_frames=15, max_disp_px=80.0,
+                         max_disp_frac=0.35)
+    for f in (11, 12):
+        motos = [v for v in held[f] if v[0] == 3]
+        assert len(motos) >= 2, f"expected left+right holds on frame {f}, got {motos}"
+        cxs = [0.5 * (v[1] + v[3]) for v in motos]
+        assert min(cxs) < 200 and max(cxs) > 280
 
 
 if __name__ == "__main__":

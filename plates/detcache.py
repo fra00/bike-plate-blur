@@ -54,6 +54,20 @@ class CacheMismatch(RuntimeError):
     """Raised when an existing cache was produced with different parameters."""
 
 
+def _is_zero_bound(v) -> bool:
+    return v is None or v == 0 or v == 0.0
+
+
+def _range_compatible(stored: dict, requested: dict) -> bool:
+    """True if clip bounds match, or a full-video cache is replaying a subclip."""
+    s_start, s_end = stored.get("start"), stored.get("end")
+    r_start, r_end = requested.get("start"), requested.get("end")
+    if s_start == r_start and s_end == r_end:
+        return True
+    full_cache = _is_zero_bound(s_start) and s_end is None
+    return full_cache
+
+
 class DetectionCache:
     """Read-or-write cache of (plates, vehicles) keyed by frame index.
 
@@ -69,6 +83,8 @@ class DetectionCache:
         self._data    = {}
         self._fh      = None
         self._written = 0
+        self.stored_start = meta.get("start")
+        self.stored_end = meta.get("end")
 
         if self.reading:
             self._load()
@@ -87,13 +103,21 @@ class DetectionCache:
                 raise CacheMismatch(f"empty detection cache: {self.path}")
             stored = json.loads(header)
             diff = [k for k in _META_KEYS
-                    if stored.get(k) != self.meta.get(k)]
+                    if k not in ("start", "end")
+                    and stored.get(k) != self.meta.get(k)]
+            if not _range_compatible(stored, self.meta):
+                diff.extend(
+                    k for k in ("start", "end")
+                    if stored.get(k) != self.meta.get(k)
+                )
             if stored.get("version") != _CACHE_VERSION or diff:
                 raise CacheMismatch(
                     f"detection cache {os.path.basename(self.path)} was built with "
                     f"different settings ({', '.join(diff) or 'version'}) — delete it "
                     f"or pass a different --detect-cache path"
                 )
+            self.stored_start = stored.get("start")
+            self.stored_end = stored.get("end")
             eof = False
             for line in fh:
                 line = line.strip()
@@ -109,6 +133,17 @@ class DetectionCache:
                 )
         self.frames  = len(self._data)
         self.partial = not eof
+
+    def replay_index(self, clip_frame: int, fps: float) -> int:
+        """Map a clip-local frame to the cache index (full-video cache + --start)."""
+        if not self.reading:
+            return clip_frame
+        if not (_is_zero_bound(self.stored_start) and self.stored_end is None):
+            return clip_frame
+        req_start = self.meta.get("start")
+        if _is_zero_bound(req_start):
+            return clip_frame
+        return int(clip_frame) + int(round(float(req_start) * float(fps)))
 
     def get(self, frame_idx: int):
         """Return (plates, vehicles) for *frame_idx*, or None when absent."""
@@ -174,6 +209,9 @@ class DetectionStore:
 
     def get(self, frame_idx: int):
         return self._data.get(frame_idx)
+
+    def replay_index(self, clip_frame: int, fps: float) -> int:
+        return clip_frame
 
     def frame_indices(self) -> list:
         return sorted(self._data)

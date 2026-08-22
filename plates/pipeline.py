@@ -17,7 +17,7 @@ from plates.constants import (
     _DD_HUD_W,
 )
 from plates.detcache import DetectionCache, DetectionStore, build_meta
-from plates.detect import detect_plates
+from plates.detect import detect_plates, MotoConfCache
 from plates.ffmpeg import (
     build_ffmpeg_encode_lossless,
     build_ffmpeg_extract,
@@ -34,8 +34,7 @@ from plates.overlay import (
 )
 from plates.redact import (
     apply_blur_feathered,
-    apply_blur_rotated_ellipse,
-    apply_blur_round,
+    apply_blur_circle,
     apply_redaction,
     load_overlay_image,
 )
@@ -113,11 +112,11 @@ def blur_license_plates(
     crop_clahe_clip: float = 2.0,
     crop_clahe_grid: int = 8,
     moto_close_conf: float = 0.20,
+    moto_min_conf: float = 0.30,
     redact_mode: str = "blur",
     redact_color: tuple = (0, 0, 0),
     redact_image_path: str = None,
     max_box_frac: float = 0.15,
-    blur_shape: str = "rect",
     forced_fixlist: dict = None,
     detect_cache: str = None,
     zone_params: dict = None,
@@ -162,6 +161,8 @@ def blur_license_plates(
     if debug:
         print(f"  Mode  : DEBUG (blur applied + detection overlay)")
     print(f"  Zones : interpolate plates inside vehicles from the full cache")
+    if moto_min_conf > 0:
+        print(f"  Moto min conf: {moto_min_conf:.2f} (YOLO floor still {moto_close_conf:.2f})")
     print(f"{'='*60}\n")
 
     info = get_video_info(input_path)
@@ -259,6 +260,7 @@ def blur_license_plates(
                         crop_clahe=crop_clahe,
                         crop_clahe_clip=crop_clahe_clip,
                         crop_clahe_grid=crop_clahe_grid,
+                        moto_min_conf=moto_min_conf,
                     )
                     cache.put(frame_num, plates, vehicles)
                     frame_num += 1
@@ -272,23 +274,33 @@ def blur_license_plates(
         print("  Models skipped  |  detections replayed from cache\n")
 
     zp = dict(zone_params or {})
-    min_moto_h_frac = float(zp.get("min_moto_h_frac", 0.1065))
+    min_moto_h_frac = float(zp.get("min_moto_h_frac", 0.08333))
     moto_size_enter_frac = float(zp.get("moto_size_enter_frac", 1.15))
     moto_size_exit_frac = float(zp.get("moto_size_exit_frac", 0.85))
     min_vehicle_iou = float(zp.get("min_vehicle_iou", 0.15))
-    max_gap_frames = int(zp.get("max_gap_frames", 15))
+    max_gap_frames = int(zp.get("max_gap_frames", 30))
     max_disp_px = float(zp.get("max_disp_px", 80.0))
     max_disp_frac = float(zp.get("max_disp_frac", 0.35))
+    max_class_flip_frames = int(zp.get("max_class_flip_frames", 10))
+    min_plate_side_px = float(zp.get("min_plate_side_px", 12.0))
+    max_area_ratio = float(zp.get("max_area_ratio", 2.5))
+    moto_min_conf = float(zp.get("moto_min_conf", moto_min_conf))
+    zone_cache = (
+        MotoConfCache(cache, moto_min_conf)
+        if moto_min_conf > 0 else cache
+    )
     filter_classes = VEHICLE_FILTER_MAP.get(vehicle_filter, set(VEHICLE_CLASSES))
     vehicles_held = hold_vehicles(
-        cache,
+        zone_cache,
         max_gap_frames=max_gap_frames,
         min_iou=min_vehicle_iou,
         max_disp_px=max_disp_px,
         max_disp_frac=max_disp_frac,
+        max_class_flip_frames=max_class_flip_frames,
+        moto_min_conf=moto_min_conf,
     )
     zones_map = build_zones(
-        cache,
+        zone_cache,
         max_gap_frames=max_gap_frames,
         max_disp_px=max_disp_px,
         max_disp_frac=max_disp_frac,
@@ -299,40 +311,32 @@ def blur_license_plates(
         min_vehicle_iou=min_vehicle_iou,
         moto_size_enter_frac=moto_size_enter_frac,
         moto_size_exit_frac=moto_size_exit_frac,
+        min_plate_side_px=min_plate_side_px,
+        max_class_flip_frames=max_class_flip_frames,
+        max_area_ratio=max_area_ratio,
     )
     _st = zone_stats(zones_map)
     print(f"  Zones : {_st['frames_with_zones']} frames, "
           f"{_st['observed_zones']} observed + {_st['bridged_zones']} interpolated")
     moto_base_blur = bool(zp.get("moto_base_blur", False))
-    moto_base_if_no_plate = bool(zp.get("moto_base_if_no_plate", False))
+    moto_base_if_no_plate = bool(zp.get("moto_base_if_no_plate", True))
     moto_base_kw = dict(
-        width_frac=float(zp.get("moto_base_width_frac", 0.42)),
         height_frac=float(zp.get("moto_base_height_frac", 1.0 / 3.0)),
-        aspect=float(zp.get("moto_base_aspect", 1.82)),
-        min_width=float(zp.get("moto_base_min_width", 36.0)),
         min_height=float(zp.get("moto_base_min_height", 22.0)),
-        strip_frac=float(zp.get("moto_base_lean_strip_frac", 0.30)),
-        snap_frac=float(zp.get("moto_base_lean_snap_frac", 0.04)),
-        max_shift_frac=float(zp.get("moto_base_lean_max_shift_frac", 0.28)),
-        snap_angle=float(zp.get("moto_base_lean_snap_angle", 8.0)),
-        rear_along_frac=float(zp.get("moto_base_rear_along_frac", 0.20)),
     )
     moto_smooth_alpha = float(zp.get("moto_base_smooth_alpha", 0.22))
     moto_smooth_alpha_pos = float(zp.get("moto_base_smooth_alpha_pos", 0.35))
-    moto_smooth_alpha_ang = float(zp.get("moto_base_smooth_alpha_ang", 0.28))
     geom_smoother = (
         MotoGeomSmoother(
             alpha=moto_smooth_alpha,
             alpha_pos=moto_smooth_alpha_pos,
-            alpha_ang=moto_smooth_alpha_ang,
             min_iou=min_vehicle_iou,
         )
         if moto_base_blur else None
     )
     if moto_base_blur:
-        print("  Moto base: oval h/3, centre h/2 from box bottom "
-              f"EMA h α={moto_smooth_alpha:.2f} pos α={moto_smooth_alpha_pos:.2f} "
-              f"ang α={moto_smooth_alpha_ang:.2f}"
+        print("  Moto base: circle h/3, centre h/2 from box bottom "
+              f"EMA h a={moto_smooth_alpha:.2f} pos a={moto_smooth_alpha_pos:.2f}"
               + (" (only if no plate hit)" if moto_base_if_no_plate else ""))
     print("  Pass 2/2: applying blur...\n" if need_detect else
           "  Applying interpolated zones...\n")
@@ -371,11 +375,12 @@ def blur_license_plates(
 
                     timings = {}
                     _t0 = time.perf_counter()
-                    cached = cache.get(frame_num)
+                    cache_fi = cache.replay_index(frame_num, fps)
+                    cached = zone_cache.get(cache_fi)
                     if cached is None and cache.reading:
                         break
                     vehicles = vehicles_held.get(
-                        frame_num,
+                        cache_fi,
                         cached[1] if cached is not None else [],
                     )
                     observed = [
@@ -386,7 +391,7 @@ def blur_license_plates(
                     timings["detect"] = (time.perf_counter() - _t0) * 1000
 
                     _t1 = time.perf_counter()
-                    plates = list(zones_map.get(frame_num, []))
+                    plates = list(zones_map.get(cache_fi, []))
                     plates = add_moto_base_zones(
                         frame, vehicles, plates, moto_large_boxes,
                         enabled=moto_base_blur,
@@ -436,24 +441,17 @@ def blur_license_plates(
                         other = [p for p in plates if not _is_base_zone(p)]
                         base = [p for p in plates if _is_base_zone(p)]
                         if other:
-                            if blur_shape == "round":
-                                frame = apply_blur_round(
-                                    frame, other,
-                                    blur_strength=blur_strength,
-                                    padding=blur_padding,
-                                )
-                            else:
-                                frame = apply_redaction(
-                                    frame, other,
-                                    mode=redact_mode,
-                                    blur_strength=blur_strength,
-                                    color=redact_color,
-                                    overlay_img=overlay_img,
-                                    padding=blur_padding,
-                                    max_box_frac=max_box_frac,
-                                )
+                            frame = apply_redaction(
+                                frame, other,
+                                mode=redact_mode,
+                                blur_strength=blur_strength,
+                                color=redact_color,
+                                overlay_img=overlay_img,
+                                padding=blur_padding,
+                                max_box_frac=max_box_frac,
+                            )
                         if base:
-                            frame = apply_blur_rotated_ellipse(
+                            frame = apply_blur_circle(
                                 frame, base,
                                 blur_strength=blur_strength,
                                 padding=blur_padding,
@@ -461,7 +459,7 @@ def blur_license_plates(
 
                     timings["render"] = (time.perf_counter() - _t2) * 1000
 
-                    forced = forced_fixlist.get(frame_num) if forced_fixlist else None
+                    forced = forced_fixlist.get(cache_fi) if forced_fixlist else None
                     if forced:
                         fixed_rects = [(*r, 0.99) for r in forced]
                         frame = apply_blur_feathered(

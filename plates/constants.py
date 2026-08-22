@@ -64,7 +64,6 @@ _DD_SOURCE_COLOR = {
     "bridge": _DD_YELLOW,
     "own": _DD_ORANGE,
     "base": (255, 180, 0),
-    "base_lean": (255, 180, 0),
 }
 
 _DD_FONT_DIR = os.path.join(os.path.expanduser("~"),

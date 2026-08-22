@@ -69,11 +69,14 @@ def main():
         max_disp_frac=float(zn.get("max_disp_frac", 0.35)),
         conf_floor=floor,
         filter_classes=filter_classes,
-        min_moto_h_frac=float(zn.get("moto_min_blur_box_h_frac", 0.1065)),
+        min_moto_h_frac=float(zn.get("moto_min_blur_box_h_frac", 0.08333)),
         frame_height=height,
         min_vehicle_iou=float(zn.get("min_vehicle_iou", 0.15)),
         moto_size_enter_frac=float(zn.get("moto_size_enter_frac", 1.15)),
         moto_size_exit_frac=float(zn.get("moto_size_exit_frac", 0.85)),
+        min_plate_side_px=float(zn.get("min_plate_side_px", 12.0)),
+        max_class_flip_frames=int(zn.get("max_class_flip_frames", 10)),
+        max_area_ratio=float(zn.get("max_area_ratio", 2.5)),
     )
 
     n_frames = 0

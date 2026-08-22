@@ -11,13 +11,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 
 from plates.detect import (
+    _MOTO_CLS,
     _box_contains_centre,
+    build_vehicle_crop_canvases,
     dedupe_vehicles,
+    drop_low_conf_motos,
     enhance_crop_contrast,
     filter_moto_plate_geometry,
     letterbox_to_square,
     moto_rear_roi,
     plate_in_moto_geometry_ok,
+    MotoConfCache,
     unletterbox_xyxy,
 )
 
@@ -171,6 +175,57 @@ def test_dedupe_does_not_merge_car_and_moto():
     car = (2, 110, 210, 170, 380, 0.8)
     out = dedupe_vehicles([moto, car])
     assert len(out) == 2
+
+
+def test_drop_low_conf_motos_keeps_cars_and_confident_bikes():
+    bus_as_moto = (3, 1400, 760, 1550, 850, 0.23)
+    real_moto = (3, 1588, 826, 1695, 931, 0.44)
+    car = (2, 100, 200, 400, 500, 0.22)
+    bus = (5, 1396, 765, 1542, 832, 0.54)
+    out = drop_low_conf_motos([bus_as_moto, real_moto, car, bus], 0.30)
+    assert bus_as_moto not in out
+    assert real_moto in out
+    assert car in out
+    assert bus in out
+
+
+def test_moto_conf_cache_filters_get():
+    class _Inner:
+        def get(self, fi):
+            return (
+                [(100, 100, 140, 130, 0.5, "crop")],
+                [(3, 80, 50, 180, 250, 0.23), (2, 10, 20, 200, 180, 0.8)],
+            )
+
+        def frame_indices(self):
+            return [0]
+
+    wrapped = MotoConfCache(_Inner(), 0.30)
+    plates, vehs = wrapped.get(0)
+    assert plates[0][:4] == (100, 100, 140, 130)
+    assert [v[0] for v in vehs] == [2]
+
+
+def test_build_vehicle_crop_canvases_moto_emits_rear_and_full():
+    frame = np.zeros((400, 400, 3), dtype=np.uint8)
+    frame[50:250, 80:180] = 40
+    vehicles = [(_MOTO_CLS, 80, 50, 180, 250, 0.9)]
+    crops = build_vehicle_crop_canvases(
+        frame, vehicles, plate_crop_imgsz=1280, crop_clahe=False)
+    sources = [c[5] for c in crops]
+    assert sources == ["crop_moto", "crop"]
+    assert all(c[0].shape[:2] == (1280, 1280) for c in crops)
+
+
+def test_build_vehicle_crop_canvases_car_is_single_full_box():
+    frame = np.zeros((400, 400, 3), dtype=np.uint8)
+    vehicles = [(2, 10, 20, 200, 180, 0.8)]
+    crops = build_vehicle_crop_canvases(
+        frame, vehicles, plate_crop_imgsz=64, crop_clahe=False)
+    assert len(crops) == 1
+    assert crops[0][5] == "crop"
+    assert crops[0][0].shape[:2] == (64, 64)
+    assert crops[0][9] == 2
 
 
 if __name__ == "__main__":

@@ -18,10 +18,15 @@ Debug/
 Debugging frame/
 training_frames/
 runs/
+smoke_frames/
+
+# Local eval stills extracted while inspecting a clip (not the pipeline)
+docs/_eval*/
 
 # Training datasets and review state
 training_data/
 training_data_v2/
+training_data_crops/
 
 # Personal config / scratch notes
 notes on configuration.txt

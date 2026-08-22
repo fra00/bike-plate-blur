@@ -306,86 +306,32 @@ def apply_blur_rotated(frame, quads, blur_strength=61, padding=8):
         roi[mask > 0] = blurred[mask > 0]
     return frame
 
-def apply_blur_round(frame, rects, blur_strength=61, padding=8,
-                     expand=1.41421356237):
-    """Gaussian-blur pixels inside an ellipse covering each rectangle.
-
-    Default *expand* is √2 so the ellipse circumscribes the rect (Italian
-    plate corners stay inside). Pass expand=1.0 for the inscribed ellipse
-    (a circle when the rect is square).
-    """
-    h, w = frame.shape[:2]
-    corner = float(expand)
-    for rect in rects:
-        x1, y1, x2, y2 = rect[:4]
-        x1 = max(0, int(x1) - padding)
-        y1 = max(0, int(y1) - padding)
-        x2 = min(w, int(x2) + padding)
-        y2 = min(h, int(y2) + padding)
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            continue
-        k = _blur_kernel(blur_strength, x2 - x1, y2 - y1)
-        # Draw the ellipse on a canvas large enough for the expanded axes, then
-        # crop back — otherwise the √2 axes are clipped by the ROI and the
-        # corners of the rect stay sharp again.
-        ax = (x2 - x1) * 0.5 * corner
-        ay = (y2 - y1) * 0.5 * corner
-        pad_x = max(0, int(np.ceil(ax - (x2 - x1) * 0.5)))
-        pad_y = max(0, int(np.ceil(ay - (y2 - y1) * 0.5)))
-        y0e, y1e = max(0, y1 - pad_y), min(h, y2 + pad_y)
-        x0e, x1e = max(0, x1 - pad_x), min(w, x2 + pad_x)
-        roi_e = frame[y0e:y1e, x0e:x1e]
-        blurred_e = cv2.GaussianBlur(roi_e, (k, k), 0)
-        mask = np.zeros(roi_e.shape[:2], dtype=np.uint8)
-        cx = (x1 + x2) * 0.5 - x0e
-        cy = (y1 + y2) * 0.5 - y0e
-        cv2.ellipse(mask, (int(cx), int(cy)), (max(1, int(ax)), max(1, int(ay))),
-                    0, 0, 360, 255, -1)
-        roi_e[mask > 0] = blurred_e[mask > 0]
-    return frame
-
-
 def apply_blur_circle(frame, rects, blur_strength=61, padding=8):
-    """Inscribed ellipse; a square rect becomes a true circle of that diameter."""
-    return apply_blur_round(
-        frame, rects, blur_strength=blur_strength, padding=padding, expand=1.0,
-    )
-
-
-def ellipse_from_zone(rect):
-    """(cx, cy, ax, ay, angle_deg) for a zone tuple; AABB fallback if no axes."""
-    x1, y1, x2, y2 = rect[:4]
-    cx = 0.5 * (float(x1) + float(x2))
-    cy = 0.5 * (float(y1) + float(y2))
-    if len(rect) >= 10:
-        return cx, cy, float(rect[8]), float(rect[9]), float(rect[7])
-    return cx, cy, 0.5 * (float(x2) - float(x1)), 0.5 * (float(y2) - float(y1)), 0.0
-
-
-def apply_blur_rotated_ellipse(frame, rects, blur_strength=61, padding=8):
-    """Gaussian-blur pixels inside each rotated ellipse (zone with angle/axes)."""
+    """Gaussian-blur pixels inside the circle inscribed in each zone AABB."""
     h, w = frame.shape[:2]
     for rect in rects:
-        cx, cy, ax, ay, angle = ellipse_from_zone(rect)
-        th = np.radians(angle)
-        half_w = float(np.hypot(ax * np.cos(th), ay * np.sin(th)))
-        half_h = float(np.hypot(ax * np.sin(th), ay * np.cos(th)))
-        x1 = max(0, int(np.floor(cx - half_w)) - padding)
-        y1 = max(0, int(np.floor(cy - half_h)) - padding)
-        x2 = min(w, int(np.ceil(cx + half_w)) + padding)
-        y2 = min(h, int(np.ceil(cy + half_h)) + padding)
-        if x2 - x1 < 2 or y2 - y1 < 2:
+        x1, y1, x2, y2 = (float(rect[0]), float(rect[1]),
+                          float(rect[2]), float(rect[3]))
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        if len(rect) >= 10:
+            r = max(float(rect[8]), float(rect[9])) + padding
+        else:
+            r = 0.5 * min(x2 - x1, y2 - y1) + padding
+        if r < 1:
             continue
-        roi = frame[y1:y2, x1:x2]
-        k = _blur_kernel(blur_strength, x2 - x1, y2 - y1)
+        x0 = max(0, int(np.floor(cx - r)))
+        y0 = max(0, int(np.floor(cy - r)))
+        x1c = min(w, int(np.ceil(cx + r)))
+        y1c = min(h, int(np.ceil(cy + r)))
+        if x1c - x0 < 2 or y1c - y0 < 2:
+            continue
+        roi = frame[y0:y1c, x0:x1c]
+        k = _blur_kernel(blur_strength, x1c - x0, y1c - y0)
         blurred = cv2.GaussianBlur(roi, (k, k), 0)
         mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-        cv2.ellipse(
-            mask,
-            (int(round(cx - x1)), int(round(cy - y1))),
-            (max(1, int(round(ax))), max(1, int(round(ay)))),
-            float(angle), 0, 360, 255, -1,
-        )
+        cv2.circle(mask, (int(round(cx - x0)), int(round(cy - y0))),
+                   max(1, int(round(r))), 255, -1)
         roi[mask > 0] = blurred[mask > 0]
     return frame
 

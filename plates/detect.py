@@ -9,10 +9,12 @@ from plates.models import _infer_batched
 
 _MOTO_CLS = 3
 _CROP_INFER_SIZE = 640
+_CROP_PAD = 12
 # YOLO often emits two boxes on one motorcycle (rider vs full bike). Same
 # class + high overlap / nested box → one vehicle.
 _VEHICLE_DEDUP_IOU = 0.4
 _VEHICLE_DEDUP_CONTAIN = 0.6
+_DEFAULT_MOTO_MIN_CONF = 0.30
 
 
 def _xyxy(v):
@@ -140,6 +142,135 @@ def unletterbox_xyxy(x1, y1, x2, y2, scale, pad_x, pad_y, crop_w, crop_h):
     return ox1, oy1, ox2, oy2
 
 
+def detect_vehicles(frame, vehicle_model, vehicle_conf=0.3,
+                    vehicle_conf_floor=None):
+    """YOLO vehicle boxes on *frame*, already remapped to full resolution.
+
+    Each item is ``(cls_id, x1, y1, x2, y2, conf)``. Duplicate boxes on the
+    same vehicle are merged. *vehicle_conf_floor* (when set below
+    *vehicle_conf*) is the model threshold; callers that need size-adaptive
+    acceptance still filter afterwards.
+    """
+    h, w = frame.shape[:2]
+    scale = DETECT_WIDTH / w
+    small = cv2.resize(frame, (DETECT_WIDTH, int(h * scale)),
+                       interpolation=cv2.INTER_LINEAR)
+    inv = 1.0 / scale
+    all_vehicles = []
+    v_conf = min(vehicle_conf, vehicle_conf_floor) if vehicle_conf_floor else vehicle_conf
+    v_results = vehicle_model(small, conf=v_conf, verbose=False)
+    for r in v_results:
+        if r.boxes is None:
+            continue
+        for box in r.boxes:
+            cls = int(box.cls[0])
+            if cls not in VEHICLE_CLASSES:
+                continue
+            vx1, vy1, vx2, vy2 = map(int, box.xyxy[0].tolist())
+            conf = float(box.conf[0])
+            all_vehicles.append((cls, int(vx1 * inv), int(vy1 * inv),
+                                 int(vx2 * inv), int(vy2 * inv), conf))
+    return dedupe_vehicles(all_vehicles)
+
+
+def drop_low_conf_motos(vehicles, min_conf: float = _DEFAULT_MOTO_MIN_CONF):
+    """Drop motorcycle boxes below *min_conf*. Car/bus/truck boxes are kept."""
+    if min_conf is None or min_conf <= 0:
+        return list(vehicles)
+    floor = float(min_conf)
+    return [
+        v for v in vehicles
+        if int(v[0]) != _MOTO_CLS or float(v[5]) >= floor
+    ]
+
+
+class MotoConfCache:
+    """Replay wrapper: same plates, motorcycles below *moto_min_conf* removed."""
+
+    def __init__(self, inner, moto_min_conf: float = _DEFAULT_MOTO_MIN_CONF):
+        self._inner = inner
+        self.moto_min_conf = float(moto_min_conf)
+
+    def frame_indices(self):
+        return self._inner.frame_indices()
+
+    def get(self, fi):
+        rec = self._inner.get(fi)
+        if rec is None:
+            return rec
+        plates, vehicles = rec
+        return plates, drop_low_conf_motos(vehicles, self.moto_min_conf)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def build_vehicle_crop_canvases(
+        frame, vehicles, *,
+        vehicle_crop_scale=2.0, moto_crop_scale=2.0,
+        moto_crop_bottom_frac=0.28, moto_crop_side_pad_frac=0.05,
+        plate_crop_imgsz=1280,
+        crop_clahe=False, crop_clahe_clip=2.0, crop_clahe_grid=8,
+        sharpen=False, sharpen_amount=1.5, sharpen_sigma=1.0,
+        vehicle_filter="all"):
+    """Letterbox canvases identical to the plate-model input in ``detect_plates``.
+
+    Each item is
+    ``(canvas_bgr, cw, ch, cx1, cy1, source, lb_scale, pad_x, pad_y, cls_id)``
+    where *cw*/*ch* are the pre-letterbox crop size and *cx1*/*cy1* its origin
+    in the frame. *source* is ``crop`` or ``crop_moto``.
+    """
+    h, w = frame.shape[:2]
+    crop_imgsz = max(32, int(plate_crop_imgsz))
+    filter_classes = VEHICLE_FILTER_MAP.get(vehicle_filter, set(VEHICLE_CLASSES))
+    crops = []
+
+    def _queue_crop(cx1, cy1, cx2, cy2, max_scale, source_tag, cls_id):
+        if max_scale < 1.0:
+            return
+        cx1c = max(0, int(cx1))
+        cy1c = max(0, int(cy1))
+        cx2c = min(w, int(cx2))
+        cy2c = min(h, int(cy2))
+        if cx2c <= cx1c or cy2c <= cy1c:
+            return
+        crop = frame[cy1c:cy2c, cx1c:cx2c]
+        if crop.size == 0:
+            return
+        if crop_clahe:
+            crop = enhance_crop_contrast(crop, crop_clahe_clip, crop_clahe_grid)
+        if sharpen:
+            crop = _unsharp_mask(crop, sharpen_amount, sharpen_sigma)
+        ch, cw = crop.shape[:2]
+        canvas, lb_scale, pad_x, pad_y = letterbox_to_square(
+            crop, size=crop_imgsz, max_scale=max_scale)
+        crops.append((canvas, cw, ch, cx1c, cy1c, source_tag,
+                      lb_scale, pad_x, pad_y, cls_id))
+
+    full_scale = max(1.0, float(vehicle_crop_scale))
+    moto_scale = max(1.0, float(moto_crop_scale))
+    for (cls, vx1, vy1, vx2, vy2, _vc) in vehicles:
+        if cls not in filter_classes:
+            continue
+        if cls == _MOTO_CLS:
+            if moto_crop_scale > 1.0:
+                rx1, ry1, rx2, ry2 = moto_rear_roi(
+                    vx1, vy1, vx2, vy2,
+                    bottom_frac=moto_crop_bottom_frac,
+                    side_pad_frac=moto_crop_side_pad_frac,
+                    frame_w=w, frame_h=h,
+                )
+                _queue_crop(rx1, ry1, rx2, ry2, moto_scale, "crop_moto", cls)
+            _queue_crop(vx1 - _CROP_PAD, vy1 - _CROP_PAD,
+                        vx2 + _CROP_PAD, vy2 + _CROP_PAD,
+                        full_scale, "crop", cls)
+        else:
+            _queue_crop(vx1 - _CROP_PAD, vy1 - _CROP_PAD,
+                        vx2 + _CROP_PAD, vy2 + _CROP_PAD,
+                        full_scale, "crop", cls)
+    return crops
+
+
 def moto_rear_roi(vx1, vy1, vx2, vy2, bottom_frac=0.40, side_pad_frac=0.05,
                   frame_w=None, frame_h=None):
     """Lower-box ROI for motorcycle plate search (frame coordinates)."""
@@ -241,7 +372,8 @@ def detect_plates(frame, vehicle_model, plate_model, device="cpu", vehicle_conf=
                   moto_crop_bottom_frac=0.28, moto_crop_side_pad_frac=0.05,
                   plate_crop_imgsz=1280,
                   crop_clahe=False, crop_clahe_clip=2.0, crop_clahe_grid=8,
-                  collect_rejected=False):
+                  collect_rejected=False,
+                  moto_min_conf=_DEFAULT_MOTO_MIN_CONF):
     """
     Returns (plate_rects, all_vehicles, rejected) where:
       plate_rects  — list of (x1, y1, x2, y2, conf) regions to blur
@@ -278,100 +410,49 @@ def detect_plates(frame, vehicle_model, plate_model, device="cpu", vehicle_conf=
       When True, below-threshold detections are collected into `rejected`
       (tagged source 'rejected') instead of being silently dropped.
     """
-    h, w = frame.shape[:2]
-    scale = DETECT_WIDTH / w
-    small = cv2.resize(frame, (DETECT_WIDTH, int(h * scale)), interpolation=cv2.INTER_LINEAR)
+    del sahi_slice_size, sahi_overlap, detect_scale
 
-    # ── Step 1: vehicle detection — collect all vehicles ──────────────────────
+    # ── Step 1: vehicle detection ─────────────────────────────────────────────
     # When vehicle_conf_floor < vehicle_conf the model runs at the floor and the
     # tracker applies a size-adaptive acceptance (a huge near-certain box is
     # trusted at lower confidence so a close moto re-acquires instantly).
-    inv = 1.0 / scale
-    all_vehicles = []   # (cls_id, x1, y1, x2, y2, conf)
-    v_conf = min(vehicle_conf, vehicle_conf_floor) if vehicle_conf_floor else vehicle_conf
-    v_results = vehicle_model(small, conf=v_conf, verbose=False)
-    for r in v_results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            cls = int(box.cls[0])
-            if cls not in VEHICLE_CLASSES:
-                continue
-            vx1, vy1, vx2, vy2 = map(int, box.xyxy[0].tolist())
-            conf = float(box.conf[0])
-            all_vehicles.append((cls, int(vx1*inv), int(vy1*inv), int(vx2*inv), int(vy2*inv), conf))
-
-    all_vehicles = dedupe_vehicles(all_vehicles)
-
-    filter_classes = VEHICLE_FILTER_MAP.get(vehicle_filter, set(VEHICLE_CLASSES))
-    del sahi_slice_size, sahi_overlap, detect_scale
+    all_vehicles = detect_vehicles(
+        frame, vehicle_model, vehicle_conf=vehicle_conf,
+        vehicle_conf_floor=vehicle_conf_floor,
+    )
+    all_vehicles = drop_low_conf_motos(all_vehicles, moto_min_conf)
 
     plate_model.confidence_threshold = min(plate_conf, plate_conf_in_vehicle)
     plate_rects = []
     rejected = []
 
     # ── Step 2: per-vehicle crop pass (the only plate search) ─────────────────
-    # Full vehicle box (and moto rear ROI) on a square canvas. Aspect ratio
-    # is preserved; upscale is capped so a large box is not zoomed then shrunk.
-    _CROP_PAD = 12
     crop_imgsz = max(32, int(plate_crop_imgsz))
-    crops = []   # (rgb canvas, cw, ch, inv_scale, cx1, cy1, source, lb_scale, pad_x, pad_y)
-
-    def _queue_crop(cx1, cy1, cx2, cy2, max_scale, source_tag):
-        if max_scale < 1.0:
-            return
-        cx1c = max(0, cx1)
-        cy1c = max(0, cy1)
-        cx2c = min(w, cx2)
-        cy2c = min(h, cy2)
-        if cx2c <= cx1c or cy2c <= cy1c:
-            return
-        crop = frame[cy1c:cy2c, cx1c:cx2c]
-        if crop.size == 0:
-            return
-        if crop_clahe:
-            crop = enhance_crop_contrast(crop, crop_clahe_clip, crop_clahe_grid)
-        if sharpen:
-            crop = _unsharp_mask(crop, sharpen_amount, sharpen_sigma)
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        ch, cw = crop_rgb.shape[:2]
-        canvas, lb_scale, pad_x, pad_y = letterbox_to_square(
-            crop_rgb, size=crop_imgsz, max_scale=max_scale)
-        crops.append((canvas, cw, ch, 1.0, cx1c, cy1c,
-                      source_tag, lb_scale, pad_x, pad_y))
-
-    full_scale = max(1.0, float(vehicle_crop_scale))
-    moto_scale = max(1.0, float(moto_crop_scale))
-    for (cls, vx1, vy1, vx2, vy2, _vc) in all_vehicles:
-        if cls not in filter_classes:
-            continue
-        if cls == _MOTO_CLS:
-            # Rear ROI at moto_crop_scale (source crop_moto). Also letterbox the
-            # full bike box so mid-box plates above the ROI floor are not dropped.
-            if moto_crop_scale > 1.0:
-                rx1, ry1, rx2, ry2 = moto_rear_roi(
-                    vx1, vy1, vx2, vy2,
-                    bottom_frac=moto_crop_bottom_frac,
-                    side_pad_frac=moto_crop_side_pad_frac,
-                    frame_w=w, frame_h=h,
-                )
-                _queue_crop(rx1, ry1, rx2, ry2, moto_scale, "crop_moto")
-            _queue_crop(vx1 - _CROP_PAD, vy1 - _CROP_PAD,
-                        vx2 + _CROP_PAD, vy2 + _CROP_PAD,
-                        full_scale, "crop")
-        else:
-            _queue_crop(vx1 - _CROP_PAD, vy1 - _CROP_PAD,
-                        vx2 + _CROP_PAD, vy2 + _CROP_PAD,
-                        full_scale, "crop")
+    crops = build_vehicle_crop_canvases(
+        frame, all_vehicles,
+        vehicle_crop_scale=vehicle_crop_scale,
+        moto_crop_scale=moto_crop_scale,
+        moto_crop_bottom_frac=moto_crop_bottom_frac,
+        moto_crop_side_pad_frac=moto_crop_side_pad_frac,
+        plate_crop_imgsz=crop_imgsz,
+        crop_clahe=crop_clahe,
+        crop_clahe_clip=crop_clahe_clip,
+        crop_clahe_grid=crop_clahe_grid,
+        sharpen=sharpen,
+        sharpen_amount=sharpen_amount,
+        sharpen_sigma=sharpen_sigma,
+        vehicle_filter=vehicle_filter,
+    )
 
     if crops:
         min_conf_thr = min(plate_conf, plate_conf_in_vehicle)
+        rgb = [cv2.cvtColor(c[0], cv2.COLOR_BGR2RGB) for c in crops]
         crop_results = _infer_batched(
-            plate_model.model, [c[0] for c in crops], conf=min_conf_thr,
+            plate_model.model, rgb, conf=min_conf_thr,
             imgsz=crop_imgsz,
         )
-        for crop_r, (_img, up_w, up_h, inv_crop, cx1, cy1,
-                     source_tag, lb_scale, pad_x, pad_y) in zip(crop_results, crops):
+        for crop_r, (_img, up_w, up_h, cx1, cy1,
+                     source_tag, lb_scale, pad_x, pad_y, _cls) in zip(crop_results, crops):
             if crop_r.boxes is None:
                 continue
             for box in crop_r.boxes:
@@ -380,10 +461,10 @@ def detect_plates(frame, vehicle_model, plate_model, device="cpu", vehicle_conf=
                                       float(box.xyxy[0][2]), float(box.xyxy[0][3]))
                 px1, py1, px2, py2 = unletterbox_xyxy(
                     bx1, by1, bx2, by2, lb_scale, pad_x, pad_y, up_w, up_h)
-                ox1 = cx1 + int(px1 * inv_crop)
-                oy1 = cy1 + int(py1 * inv_crop)
-                ox2 = cx1 + int(px2 * inv_crop)
-                oy2 = cy1 + int(py2 * inv_crop)
+                ox1 = cx1 + int(px1)
+                oy1 = cy1 + int(py1)
+                ox2 = cx1 + int(px2)
+                oy2 = cy1 + int(py2)
                 if ox2 <= ox1 or oy2 <= oy1:
                     continue
                 if c < plate_conf_in_vehicle:

@@ -248,7 +248,6 @@ plate_conf_in_vehicle = 0.15
 
 [blur]
 strength = 35
-blur_shape = "round"
 
 [zones]
 max_gap_frames = 15               # interpolate up to ~0.5 s of missed detections

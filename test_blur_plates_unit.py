@@ -65,21 +65,21 @@ def test_apply_blur_respects_frame_bounds():
     assert out.shape == frame.shape
 
 
-def test_apply_blur_round_covers_rect_corners():
+def test_apply_blur_circle_blurs_centre_not_corners():
     rng = np.random.default_rng(11)
     frame = rng.integers(0, 255, (120, 120, 3), dtype=np.uint8)
     out = frame.copy()
-    bp.apply_blur_round(out, [(40, 40, 80, 80)], blur_strength=35, padding=0)
+    bp.apply_blur_circle(out, [(40, 40, 80, 80)], blur_strength=35, padding=0)
     assert not (out[60, 60] == frame[60, 60]).all()
-    assert not (out[42, 42] == frame[42, 42]).all()
+    assert (out[42, 42] == frame[42, 42]).all()
     assert (out[10, 10] == frame[10, 10]).all()
 
 
-def test_apply_blur_round_respects_frame_bounds():
+def test_apply_blur_circle_respects_frame_bounds():
     frame = np.zeros((50, 50, 3), dtype=np.uint8)
     out = frame.copy()
-    bp.apply_blur_round(out, [(-20, -20, 20, 20), (40, 40, 99, 99)],
-                        blur_strength=35, padding=8)
+    bp.apply_blur_circle(out, [(-20, -20, 20, 20), (40, 40, 99, 99)],
+                         blur_strength=35, padding=8)
     assert out.shape == frame.shape
 
 
