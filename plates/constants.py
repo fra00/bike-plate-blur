@@ -36,7 +36,6 @@ _DBG_VEHICLE_SMALL_COLOR = (180,   0, 255)  # magenta — moto below min blur he
 _DBG_GHOST_COLOR      = (180,  80,  80)   # dim teal — tracked vehicle, detector missed
 _DBG_SUPPRESSED_COLOR = (120, 120, 120)   # grey    — duplicate plate, suppressed
 _DBG_PLATE_COLOR      = (255,  80,   0)   # blue  — raw plate-model detection
-_DBG_BASE_COLOR       = (255, 180,   0)   # cyan  — geometric moto zone (box base)
 _DBG_PREDICT_COLOR = (  0, 220, 220)   # yellow — tracker-predicted (gap fill)
 _DBG_BLUR_COLOR    = (  0,   0, 220)   # red    — padded blur region
 _DBG_OWN_COLOR     = (  0, 140, 255)   # orange — own plate fixed region
@@ -63,7 +62,6 @@ _DD_SOURCE_COLOR = {
     "crop_moto": _DD_BLUE,
     "bridge": _DD_YELLOW,
     "own": _DD_ORANGE,
-    "base": (255, 180, 0),
 }
 
 _DD_FONT_DIR = os.path.join(os.path.expanduser("~"),

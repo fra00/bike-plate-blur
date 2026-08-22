@@ -441,6 +441,24 @@ def test_hold_does_not_relabel_low_conf_truck_as_moto():
         assert not any(v[1] < 1450 and v[5] < 0.30 for v in motos)
 
 
+def test_hold_does_not_invent_second_moto_before_it_exists():
+    """Close bike then a different smaller bike later: no ghost in between."""
+    close = _moto(1710, 648, 1918, 930, 0.83)
+    close_next = _moto(1720, 655, 1918, 930, 0.83)
+    later = _moto(1662, 702, 1764, 804, 0.83)
+    cache = _FakeCache({
+        10: ([], [close]),
+        11: ([], [close_next]),
+        12: ([], [close_next]),
+        20: ([], [later]),
+    })
+    held = hold_vehicles(cache, max_gap_frames=15, max_disp_px=80.0,
+                         max_disp_frac=0.35)
+    for f in (11, 12):
+        motos = [v for v in held[f] if v[0] == 3]
+        assert len(motos) == 1, f"expected only YOLO moto on {f}, got {motos}"
+
+
 def test_hold_vehicles_forks_merged_moto_split():
     """YOLO one wide box for two bikes, then only the left, then both."""
     wide = _moto(100, 400, 400, 700, 0.6)
